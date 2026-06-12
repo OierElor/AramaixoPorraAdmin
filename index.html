@@ -208,6 +208,13 @@
       background: var(--pill); color: var(--text); font-size: 12px;
     }
     .mapping-grid { display: grid; gap: 10px; }
+    .csv-column-summary {
+      display: grid; gap: 8px;
+      padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg); color: var(--text); font-size: 12px; margin-bottom: 12px;
+    }
+    .csv-column-summary strong { color: var(--muted); font-weight: 600; margin-right: 6px; }
+    .csv-column-summary .badge { margin: 2px 4px 2px 0; border-radius: 6px; }
     .map-row {
       display: grid; grid-template-columns: 1fr auto 1.2fr;
       gap: 10px; align-items: center;
@@ -570,8 +577,10 @@
                   <option value="porralariak">Porralariak — Izena</option>
                   <option value="txirrindulariak">Txirrindulariak — Izena</option>
                   <option value="txapelketak">Txapelketak — Izena, Urtea</option>
-                  <option value="karrerak">Karrerak — Txapelketa_ID, Izena, Urtea</option>
-                  <option value="txirrindulari_emaitzak">Txirrindulari sailkapena — Txapelketa_ID, Posizioa, Txirrindularia, Puntuak</option>
+                  <option value="karrerak">Karrerak — Izena, Urtea</option>
+                  <option value="porralari_emaitzak">Porralari emaitzak (txapelketa) — Posizioa, Ezizena, Puntuak</option>
+                  <option value="txirrindulari_emaitzak">Txirrindulari emaitzak (txapelketa) — Posizioa, Txirrindularia, Puntuak</option>
+                  <option value="karrera_txirrindulari_emaitzak">Txirrindulari emaitzak (karrera) — Txirrindularia, Puntuak, Dortsala</option>
                 </select>
               </div>
             </div>
@@ -635,9 +644,9 @@ Giro D'Italia,2026</pre>
 
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Karrerak</div>
-              <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;color:var(--text);overflow-x:auto">Txapelketa_ID,Izena,Urtea
-4,7. etapa,2025
-4,Emaitza,2025</pre>
+              <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;color:var(--text);overflow-x:auto">Izena,Urtea
+7. etapa,2025
+Emaitza,2025</pre>
             </div>
 
             <div>

@@ -60,22 +60,42 @@ CSV_PROFILES = {
     "karrerak": {
         "label": "Karrerak",
         "target": "Karrerak",
-        "fields": ["Txapelketa_ID", "Izena", "Urtea"],
+        "fields": ["Izena", "Urtea"],
+        "context_fields": ["Txapelketa_ID"],
         "required": ["Txapelketa_ID", "Izena", "Urtea"],
         "identity": ["Karrerak_ID"],
     },
     "txirrindulari_emaitzak": {
-        "label": "Txirrindulari sailkapena",
+        "label": "Txirrindulari emaitzak (txapelketa)",
         "target": "TxapelketaEmaitzaTxirrindulariak",
-        "fields": ["Txapelketa_ID", "Posizioa", "Txirrindularia", "Puntuak", "Dortsala"],
+        "fields": ["Posizioa", "Txirrindularia", "Puntuak"],
+        "context_fields": ["Txapelketa_ID"],
         "required": ["Txapelketa_ID", "Posizioa", "Txirrindularia", "Puntuak"],
         "identity": ["Txapelketa_ID", "Txirrindularia_ID"],
+    },
+    "porralari_emaitzak": {
+        "label": "Porralari emaitzak (txapelketa)",
+        "target": "TxapelketaEmaitzaPorralariak",
+        "fields": ["Posizioa", "Ezizena", "Puntuak"],
+        "context_fields": ["Txapelketa_ID"],
+        "required": ["Txapelketa_ID", "Posizioa", "Ezizena", "Puntuak"],
+        "identity": ["Txapelketa_ID", "Ezizen_ID"],
+    },
+    "karrera_txirrindulari_emaitzak": {
+        "label": "Txirrindulari emaitzak (karrera)",
+        "target": "KarreraSailkapena",
+        "fields": ["Txirrindularia", "Puntuak", "Dortsala"],
+        "context_fields": ["Karrera_ID"],
+        "required": ["Karrera_ID", "Txirrindularia", "Puntuak", "Dortsala"],
+        "identity": ["Karrera_ID", "Txirrindularia_ID"],
     },
 }
 
 FIELD_ALIASES = {
     "Txapelketa_ID": ["Txapelketa_ID", "Txapelketa", "Competition", "Competition_ID"],
+    "Karrera_ID": ["Karrera_ID", "Karrerak_ID", "Karrera", "Race", "Race_ID"],
     "Karrerak_ID": ["Karrerak_ID", "Karrera_ID"],
+    "Ezizena": ["Ezizena", "Porralaria", "Porralari", "Nickname"],
     "Txirrindularia": ["Txirrindularia", "Izena", "Rider", "Cyclist"],
     "Porralaria": ["Porralaria", "Ezizena", "Porralari"],
     "Posizioa": ["Posizioa", "Sailkapena", "Postua", "Rank"],
@@ -144,11 +164,14 @@ def _first_match(raw: dict, names: list[str]):
 
 
 def _resolve_raw_value(raw: dict, mapping: dict, logical_key: str):
-    csv_col = mapping.get(logical_key)
-    if csv_col:
+    if logical_key in mapping:
+        csv_col = mapping.get(logical_key)
+        if not csv_col:
+            return None
         for key, value in raw.items():
             if str(key).strip().lower() == str(csv_col).strip().lower():
                 return value
+        return None
 
     aliases = FIELD_ALIASES.get(logical_key, [logical_key])
     value = _first_match(raw, aliases)
@@ -189,6 +212,25 @@ def _ensure_txirrindularia_id(con, name: str) -> int:
     return int(cur.lastrowid)
 
 
+def _find_ezizen_id(con, txapelketa_id: int, ezizena: str):
+    row = con.execute(
+        'SELECT Ezizen_ID FROM "PorralariEzizenak" WHERE Txapelketa_ID = ? AND Ezizena = ?',
+        [txapelketa_id, ezizena],
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _ensure_ezizen_id(con, txapelketa_id: int, ezizena: str) -> int:
+    ezizen_id = _find_ezizen_id(con, txapelketa_id, ezizena)
+    if ezizen_id is not None:
+        return int(ezizen_id)
+    cur = con.execute(
+        'INSERT INTO "PorralariEzizenak" (Txapelketa_ID, Ezizena) VALUES (?, ?)',
+        [txapelketa_id, ezizena],
+    )
+    return int(cur.lastrowid)
+
+
 def _delete_rows_by_identity(con, table: str, identity_fields: list[str], identities: list[dict]):
     if not identity_fields or not identities:
         return 0
@@ -224,9 +266,13 @@ def _normalize_row(profile_id: str, mapping: dict, raw: dict, context: dict | No
         return None
 
     context = context or {}
+    context_fields = set(spec.get("context_fields", []))
 
     def get(logical_key: str):
-        value = _resolve_raw_value(raw, mapping, logical_key)
+        if logical_key in context_fields:
+            value = context.get(logical_key)
+        else:
+            value = _resolve_raw_value(raw, mapping, logical_key)
         if value is None and logical_key in context:
             value = context.get(logical_key)
         if isinstance(value, str):
@@ -282,6 +328,54 @@ def _normalize_row(profile_id: str, mapping: dict, raw: dict, context: dict | No
 
         return norm
 
+    if profile_id == "porralari_emaitzak":
+        txap_id = _to_int(get("Txapelketa_ID"))
+        posizioa = _to_int(get("Posizioa"))
+        ezizena = get("Ezizena")
+        puntuak = _to_int(get("Puntuak"))
+        if txap_id is None or posizioa is None or not ezizena or puntuak is None:
+            return None
+
+        norm = {
+            "Txapelketa_ID": txap_id,
+            "Posizioa": posizioa,
+            "Ezizena": ezizena,
+            "Puntuak": puntuak,
+        }
+
+        if con is not None:
+            ezizen_id = _find_ezizen_id(con, txap_id, ezizena)
+            if ezizen_id is not None:
+                norm["Ezizen_ID"] = int(ezizen_id)
+            elif create_missing:
+                norm["Ezizen_ID"] = _ensure_ezizen_id(con, txap_id, ezizena)
+
+        return norm
+
+    if profile_id == "karrera_txirrindulari_emaitzak":
+        karrera_id = _to_int(get("Karrera_ID"))
+        txirr_name = get("Txirrindularia")
+        puntuak = _to_int(get("Puntuak"))
+        dortsala = _to_int(get("Dortsala"))
+        if karrera_id is None or not txirr_name or puntuak is None or dortsala is None:
+            return None
+
+        norm = {
+            "Karrera_ID": karrera_id,
+            "Txirrindularia": txirr_name,
+            "Puntuak": puntuak,
+            "Dortsala": dortsala,
+        }
+
+        if con is not None:
+            rider_id = _find_txirrindularia_id(con, txirr_name)
+            if rider_id is not None:
+                norm["Txirrindularia_ID"] = int(rider_id)
+            elif create_missing:
+                norm["Txirrindularia_ID"] = _ensure_txirrindularia_id(con, txirr_name)
+
+        return norm
+
     return None
 
 
@@ -309,6 +403,28 @@ def _row_exists(con, profile_id: str, norm: dict) -> tuple[bool, str]:
             [norm["Txapelketa_ID"], rider_id],
         ).fetchone()
         return (bool(r), f"Txirrindularia_ID={rider_id}" if r else "")
+    if profile_id == "porralari_emaitzak":
+        ezizen_id = norm.get("Ezizen_ID")
+        if ezizen_id is None:
+            ezizen_id = _find_ezizen_id(con, norm["Txapelketa_ID"], norm["Ezizena"])
+        if ezizen_id is None:
+            return False, ""
+        r = con.execute(
+            'SELECT 1 FROM "TxapelketaEmaitzaPorralariak" WHERE Txapelketa_ID = ? AND Ezizen_ID = ?',
+            [norm["Txapelketa_ID"], ezizen_id],
+        ).fetchone()
+        return (bool(r), f"Ezizen_ID={ezizen_id}" if r else "")
+    if profile_id == "karrera_txirrindulari_emaitzak":
+        rider_id = norm.get("Txirrindularia_ID")
+        if rider_id is None:
+            rider_id = _find_txirrindularia_id(con, norm["Txirrindularia"])
+        if rider_id is None:
+            return False, ""
+        r = con.execute(
+            'SELECT 1 FROM "KarreraSailkapena" WHERE Karrera_ID = ? AND Txirrindularia_ID = ?',
+            [norm["Karrera_ID"], rider_id],
+        ).fetchone()
+        return (bool(r), f"Txirrindularia_ID={rider_id}" if r else "")
     return False, ""
 
 
@@ -334,6 +450,24 @@ def _insert_row(con, profile_id: str, norm: dict) -> dict:
             [norm["Txapelketa_ID"], int(rider_id), norm["Posizioa"], norm["Puntuak"]],
         )
         return {"Txapelketa_ID": norm["Txapelketa_ID"], "Txirrindularia_ID": int(rider_id)}
+    if profile_id == "porralari_emaitzak":
+        ezizen_id = norm.get("Ezizen_ID")
+        if ezizen_id is None:
+            ezizen_id = _ensure_ezizen_id(con, norm["Txapelketa_ID"], norm["Ezizena"])
+        con.execute(
+            'INSERT INTO "TxapelketaEmaitzaPorralariak" (Txapelketa_ID, Ezizen_ID, Posizioa, Puntuak) VALUES (?, ?, ?, ?)',
+            [norm["Txapelketa_ID"], int(ezizen_id), norm["Posizioa"], norm["Puntuak"]],
+        )
+        return {"Txapelketa_ID": norm["Txapelketa_ID"], "Ezizen_ID": int(ezizen_id)}
+    if profile_id == "karrera_txirrindulari_emaitzak":
+        rider_id = norm.get("Txirrindularia_ID")
+        if rider_id is None:
+            rider_id = _ensure_txirrindularia_id(con, norm["Txirrindularia"])
+        con.execute(
+            'INSERT INTO "KarreraSailkapena" (Karrera_ID, Txirrindularia_ID, Puntuak, Dortsala) VALUES (?, ?, ?, ?)',
+            [norm["Karrera_ID"], int(rider_id), norm["Puntuak"], norm["Dortsala"]],
+        )
+        return {"Karrera_ID": norm["Karrera_ID"], "Txirrindularia_ID": int(rider_id)}
     raise ValueError(f"Taula ezezaguna: {profile_id}")
 
 
@@ -958,16 +1092,32 @@ APP_JS = r"""
         karrerak: {
             label: "Karrerak",
             target: "Karrerak",
-            fields: ["Txapelketa_ID", "Izena", "Urtea"],
+            fields: ["Izena", "Urtea"],
+            contextFields: ["Txapelketa_ID"],
         },
         txirrindulari_emaitzak: {
-            label: "Txirrindulari sailkapena",
+            label: "Txirrindulari emaitzak (txapelketa)",
             target: "TxapelketaEmaitzaTxirrindulariak",
-            fields: ["Txapelketa_ID", "Posizioa", "Txirrindularia", "Puntuak", "Dortsala"],
+            fields: ["Posizioa", "Txirrindularia", "Puntuak"],
+            contextFields: ["Txapelketa_ID"],
+        },
+        porralari_emaitzak: {
+            label: "Porralari emaitzak (txapelketa)",
+            target: "TxapelketaEmaitzaPorralariak",
+            fields: ["Posizioa", "Ezizena", "Puntuak"],
+            contextFields: ["Txapelketa_ID"],
+        },
+        karrera_txirrindulari_emaitzak: {
+            label: "Txirrindulari emaitzak (karrera)",
+            target: "KarreraSailkapena",
+            fields: ["Txirrindularia", "Puntuak", "Dortsala"],
+            contextFields: ["Karrera_ID"],
         },
     };
     const FIELD_ALIASES = {
         Txapelketa_ID: ["Txapelketa_ID", "Txapelketa", "Competition", "Competition_ID"],
+        Karrera_ID: ["Karrera_ID", "Karrerak_ID", "Karrera", "Race", "Race_ID"],
+        Ezizena: ["Ezizena", "Porralaria", "Porralari", "Nickname"],
         Txirrindularia: ["Txirrindularia", "Izena", "Rider", "Cyclist"],
         Posizioa: ["Posizioa", "Sailkapena", "Postua", "Rank"],
         Puntuak: ["Puntuak", "Puntu", "Points"],
@@ -1003,8 +1153,11 @@ APP_JS = r"""
     // ── Urrats 1: Fitxategia kargatu ─────────────────────────────────────
     function defaultCsvContext(type) {
         const ctx = {};
-        if (type === "txirrindulari_emaitzak") {
+        if (["karrerak", "txirrindulari_emaitzak", "porralari_emaitzak"].includes(type)) {
             ctx.Txapelketa_ID = el("dash-txap-sel")?.value || state.txapelketak[0]?.Txapelketa_ID || "";
+        }
+        if (type === "karrera_txirrindulari_emaitzak") {
+            ctx.Karrera_ID = state.karrerak[0]?.Karrerak_ID || "";
         }
         return ctx;
     }
@@ -1039,6 +1192,32 @@ APP_JS = r"""
         return mapping;
     }
 
+    function csvColumnSummary(headers, mapping) {
+        const used = new Set(Object.values(mapping || {}).filter(Boolean));
+        const ignored = headers.filter(h => !used.has(h));
+        const usedHtml = used.size
+            ? [...used].map(h => `<span class="badge">${esc(h)}</span>`).join(" ")
+            : `<span style="color:var(--muted)">Ez dago zutaberik lotuta</span>`;
+        const ignoredHtml = ignored.length
+            ? ignored.map(h => `<span class="badge">${esc(h)}</span>`).join(" ")
+            : `<span style="color:var(--muted)">CSV-ko zutabe guztiak erabiliko dira</span>`;
+        return `
+            <div class="csv-column-summary" id="csv-column-summary">
+                <div><strong>DB-ra pasatuko diren CSV zutabeak:</strong> ${usedHtml}</div>
+                <div><strong>Ez dira gordeko:</strong> ${ignoredHtml}</div>
+            </div>`;
+    }
+
+    function renderCsvColumnSummary() {
+        const wrap = el("csv-column-summary");
+        if (!wrap || !state.csv) return;
+        const used = new Set(Object.values(state.csv.mapping || {}).filter(Boolean));
+        const ignored = state.csv.headers.filter(h => !used.has(h));
+        wrap.innerHTML = `
+            <div><strong>DB-ra pasatuko diren CSV zutabeak:</strong> ${used.size ? [...used].map(h => `<span class="badge">${esc(h)}</span>`).join(" ") : `<span style="color:var(--muted)">Ez dago zutaberik lotuta</span>`}</div>
+            <div><strong>Ez dira gordeko:</strong> ${ignored.length ? ignored.map(h => `<span class="badge">${esc(h)}</span>`).join(" ") : `<span style="color:var(--muted)">CSV-ko zutabe guztiak erabiliko dira</span>`}</div>`;
+    }
+
     // ── Urrats 1 UI ──────────────────────────────────────────────────────
     function renderStep1() {
         const wrap = el("csv-steps"); if (!wrap) return;
@@ -1060,7 +1239,7 @@ APP_JS = r"""
                 </select>
             </div>`).join("");
 
-        const contextHtml = type === "txirrindulari_emaitzak" ? `
+        const txapContextHtml = ["karrerak", "txirrindulari_emaitzak", "porralari_emaitzak"].includes(type) ? `
         <div class="csv-step-card">
             <div class="step-label"><span class="step-num">3</span> Testuingurua</div>
             <div class="map-row">
@@ -1068,7 +1247,17 @@ APP_JS = r"""
                 <span class="map-arrow">→</span>
                 <select class="filter-sel csv-context-sel" id="csv-txap-sel"></select>
             </div>
-            <p style="margin-top:10px;color:var(--muted);font-size:12px">CSV-ko Txapelketa_ID zutabea ez baduzu mapatzen, hemen hautatutako txapelketa erabiliko da.</p>
+            <p style="margin-top:10px;color:var(--muted);font-size:12px">ID-ak ez dira CSV-tik hartzen; hemen hautatutako txapelketa erabiliko da lotura egiteko.</p>
+        </div>` : "";
+        const karreraContextHtml = type === "karrera_txirrindulari_emaitzak" ? `
+        <div class="csv-step-card">
+            <div class="step-label"><span class="step-num">3</span> Testuingurua</div>
+            <div class="map-row">
+                <span class="map-field">Karrera</span>
+                <span class="map-arrow">→</span>
+                <select class="filter-sel csv-context-sel" id="csv-karrera-sel"></select>
+            </div>
+            <p style="margin-top:10px;color:var(--muted);font-size:12px">ID-ak ez dira CSV-tik hartzen; hemen hautatutako karrera erabiliko da lotura egiteko.</p>
         </div>` : "";
 
         // Raw preview (lehenengo 5 lerro)
@@ -1081,7 +1270,8 @@ APP_JS = r"""
         wrap.innerHTML = `
         <div class="csv-step-card">
             <div class="step-label"><span class="step-num">1</span> CSV kargatu — <span style="color:var(--muted)">${esc(rows.length)} lerro, ${esc(headers.length)} zutabe</span></div>
-            <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Mapatu gabeko zutabeak ez dira gordetzen; profil bakoitzean beharrezko eremuak bakarrik erabiltzen dira.</p>
+            <p style="color:var(--muted);font-size:12px;margin-bottom:12px">ID zutabeak ez dira CSV-tik hartzen: datu-baseak sortzen ditu edo pantailako hautagailuetatik erabiltzen dira loturak egiteko. Mapatu gabeko zutabeak ez dira gordetzen.</p>
+            ${csvColumnSummary(headers, state.csv.mapping)}
             ${previewHtml}
         </div>
         <div class="csv-step-card">
@@ -1091,13 +1281,15 @@ APP_JS = r"""
                 🔍 Aldaketak aurreikusi
             </button>
         </div>
-        ${contextHtml}
+        ${txapContextHtml}
+        ${karreraContextHtml}
         <div id="step3-wrap"></div>`;
 
         // Binding
         wrap.querySelectorAll(".map-sel").forEach(s => {
             s.addEventListener("change", () => {
                 state.csv.mapping[s.dataset.field] = s.value;
+                renderCsvColumnSummary();
             });
         });
         const csvTxapSel = el("csv-txap-sel");
@@ -1107,6 +1299,21 @@ APP_JS = r"""
             csvTxapSel.addEventListener("change", () => {
                 state.csv.context = state.csv.context || {};
                 state.csv.context.Txapelketa_ID = csvTxapSel.value;
+            });
+        }
+        const csvKarreraSel = el("csv-karrera-sel");
+        if (csvKarreraSel) {
+            const cur = state.csv.context?.Karrera_ID || "";
+            csvKarreraSel.innerHTML = [`<option value="">— Karrera aukeratu —</option>`,
+                ...state.karrerak.map(k => `<option value="${esc(k.Karrerak_ID)}">${esc(k.Izena)} (${esc(k.Urtea)})</option>`)
+            ].join("");
+            if (cur) csvKarreraSel.value = String(cur);
+            else if (state.karrerak.length) csvKarreraSel.selectedIndex = 1;
+            state.csv.context = state.csv.context || {};
+            state.csv.context.Karrera_ID = csvKarreraSel.value;
+            csvKarreraSel.addEventListener("change", () => {
+                state.csv.context = state.csv.context || {};
+                state.csv.context.Karrera_ID = csvKarreraSel.value;
             });
         }
         el("btn-preview")?.addEventListener("click", runPreview);
