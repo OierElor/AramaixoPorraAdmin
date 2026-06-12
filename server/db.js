@@ -14,13 +14,26 @@ const DB_PATH = path.join(__dirname, '..', chosen);
 const db = new Database(DB_PATH);
 console.log('Using SQLite DB at', DB_PATH);
 
-// Initialize DB from schema.sql (CREATE TABLE IF NOT EXISTS is safe to run repeatedly)
+// Initialize DB from schema.sql: run statements one-by-one and ignore "already exists" errors
 if (fs.existsSync(SCHEMA_PATH)) {
   const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
-  try {
-    db.exec(schema);
-  } catch (err) {
-    console.warn('Failed to apply schema.sql:', err.message);
+  // Split on semicolons; tolerate trailing semicolon/newlines
+  const statements = schema
+    .split(/;\s*(?:\n|$)/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  for (const stmt of statements) {
+    try {
+      db.exec(stmt + ';');
+    } catch (err) {
+      // Ignore errors about existing tables/indexes
+      if (/already exists/i.test(err.message)) {
+        console.info('Schema: ignored existing object —', err.message);
+        continue;
+      }
+      console.warn('Schema statement failed:', err.message);
+    }
   }
 } else {
   console.warn('schema.sql not found at', SCHEMA_PATH);
