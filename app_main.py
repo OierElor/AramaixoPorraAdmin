@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Aramaixo Porra — server.py
+Aramaixo Porra backend.
 Zero dependentzia: Python stdlib soilik (sqlite3 + http.server)
-Erabili: python3 server.py
 """
 
 import json
@@ -12,20 +11,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-# ── Config ───────────────────────────────────────────────────────
-BASE_DIR   = Path(__file__).parent
-PUBLIC_DIR = BASE_DIR / "public"
-SCHEMA     = BASE_DIR / "schema.sql"
-PORT       = int(os.environ.get("PORT", 3000))
+BASE_DIR = Path(__file__).parent
+SCHEMA = BASE_DIR / "schema.sql"
+PORT = int(os.environ.get("PORT", 3000))
 
 MIME = {
     ".html": "text/html; charset=utf-8",
-    ".js":   "application/javascript; charset=utf-8",
-    ".css":  "text/css; charset=utf-8",
-    ".ico":  "image/x-icon",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".ico": "image/x-icon",
 }
 
-# ── DB ───────────────────────────────────────────────────────────
+
 def find_db() -> Path:
     if env := os.environ.get("DB_FILE"):
         return Path(env)
@@ -33,10 +30,12 @@ def find_db() -> Path:
         p = BASE_DIR / name
         if p.exists():
             return p
-    return BASE_DIR / "data.db"
+    return BASE_DIR / "AramaixoPorra.db"
+
 
 DB_PATH = find_db()
-print(f"DB: {DB_PATH}")
+print(f"DB: {DB_PATH.resolve()}")
+
 
 def get_db():
     con = sqlite3.connect(DB_PATH)
@@ -44,9 +43,11 @@ def get_db():
     con.execute("PRAGMA foreign_keys = ON")
     return con
 
+
 def init_db():
     if not SCHEMA.exists():
-        print("Warning: schema.sql not found"); return
+        print("Warning: schema.sql not found")
+        return
     con = get_db()
     for stmt in (s.strip() for s in SCHEMA.read_text("utf-8").split(";") if s.strip()):
         try:
@@ -54,14 +55,32 @@ def init_db():
         except sqlite3.OperationalError as e:
             if "already exists" not in str(e):
                 print(f"Schema: {e}")
-    con.commit(); con.close()
+    con.commit()
+    con.close()
+
 
 init_db()
+
 
 def rows(con, sql, params=()):
     return [dict(r) for r in con.execute(sql, params).fetchall()]
 
-# ── Request handler ──────────────────────────────────────────────
+
+def db_meta():
+    with get_db() as con:
+        tables = [
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall()
+        ]
+    return {
+        "db_path": str(DB_PATH.resolve()),
+        "db_exists": DB_PATH.exists(),
+        "tables": tables,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
@@ -83,7 +102,6 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(length)) if length else {}
 
-    # ── GET ──────────────────────────────────────────────────────
     def do_GET(self):
         path = urlparse(self.path).path
 
@@ -129,13 +147,15 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/sariak":
             with get_db() as c:
-                self.send_json(rows(c,
-                    'SELECT * FROM "Sariak" ORDER BY Txapelketa_ID DESC, Posizioa ASC'))
+                self.send_json(rows(c, 'SELECT * FROM "Sariak" ORDER BY Txapelketa_ID DESC, Posizioa ASC'))
+
+        elif path == "/api/meta":
+            self.send_json(db_meta())
 
         else:
-            file_path = PUBLIC_DIR / (path.lstrip("/") or "index.html")
+            file_path = BASE_DIR / (path.lstrip("/") or "index.html")
             if not file_path.exists() or not file_path.is_file():
-                file_path = PUBLIC_DIR / "index.html"
+                file_path = BASE_DIR / "index.html"
             try:
                 content = file_path.read_bytes()
                 mime = MIME.get(file_path.suffix, "application/octet-stream")
@@ -154,7 +174,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-    # ── POST ─────────────────────────────────────────────────────
     def do_POST(self):
         path = urlparse(self.path).path
         data = self.read_json()
@@ -175,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(row)
 
             elif path == "/api/porralariak":
-                izena  = (data.get("Izena") or "").strip()
+                izena = (data.get("Izena") or "").strip()
                 zenbat = data.get("Zenbat_Porra", 1)
                 if not izena:
                     return self.send_error_json("Missing Izena", 400)
@@ -202,8 +221,8 @@ class Handler(BaseHTTPRequestHandler):
 
             elif path == "/api/karrerak":
                 txap_id = data.get("Txapelketa_ID")
-                izena   = (data.get("Izena") or "").strip()
-                urtea   = data.get("Urtea")
+                izena = (data.get("Izena") or "").strip()
+                urtea = data.get("Urtea")
                 if not txap_id or not izena or not urtea:
                     return self.send_error_json("Missing fields", 400)
                 with get_db() as c:
@@ -223,11 +242,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error_json(str(e), 500)
 
-# ── Main ─────────────────────────────────────────────────────────
-if __name__ == "__main__":
+
+def main():
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     print(f"http://localhost:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nAgur!")
+
+
+if __name__ == "__main__":
+    main()
