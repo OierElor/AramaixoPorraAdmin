@@ -16,7 +16,7 @@ import os
 import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 BASE_DIR = Path(__file__).parent
 SCHEMA   = BASE_DIR / "schema.sql"
@@ -342,7 +342,7 @@ def db_meta():
         tables = [
             row[0]
             for row in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             ).fetchall()
         ]
     return {
@@ -350,6 +350,69 @@ def db_meta():
         "db_exists": DB_PATH.exists(),
         "tables":   tables,
     }
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def read_table(table_name: str) -> dict:
+    with get_db() as con:
+        exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? AND name NOT LIKE 'sqlite_%'",
+            [table_name],
+        ).fetchone()
+        if not exists:
+            raise ValueError(f"Taula ez da existitzen: {table_name}")
+
+        quoted = _quote_ident(table_name)
+        cols = [dict(r) for r in con.execute(f"PRAGMA table_info({quoted})").fetchall()]
+        cur = con.execute(f"SELECT * FROM {quoted}")
+        table_rows = [dict(r) for r in cur.fetchall()]
+
+    return {
+        "name": table_name,
+        "columns": [{"name": c["name"], "type": c["type"], "pk": c["pk"]} for c in cols],
+        "rows": table_rows,
+        "count": len(table_rows),
+    }
+
+
+def update_table_row(table_name: str, payload: dict) -> dict:
+    pk_values = payload.get("pk") or {}
+    values = payload.get("values") or {}
+    if not isinstance(pk_values, dict) or not isinstance(values, dict):
+        raise ValueError("Datu baliogabeak")
+
+    with get_db() as con:
+        exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? AND name NOT LIKE 'sqlite_%'",
+            [table_name],
+        ).fetchone()
+        if not exists:
+            raise ValueError(f"Taula ez da existitzen: {table_name}")
+
+        quoted = _quote_ident(table_name)
+        columns = [dict(r) for r in con.execute(f"PRAGMA table_info({quoted})").fetchall()]
+        column_names = {c["name"] for c in columns}
+        pk_columns = [c["name"] for c in sorted((c for c in columns if c["pk"]), key=lambda c: c["pk"])]
+        if not pk_columns:
+            raise ValueError("Taula honek ez dauka primary key-rik")
+        if any(col not in pk_values for col in pk_columns):
+            raise ValueError("Primary key balioak falta dira")
+
+        editable = [col for col in column_names if col not in pk_columns]
+        changes = {k: v for k, v in values.items() if k in editable}
+        if not changes:
+            raise ValueError("Ez dago aldatzeko zutaberik")
+
+        set_sql = ", ".join(f"{_quote_ident(col)} = ?" for col in changes)
+        where_sql = " AND ".join(f"{_quote_ident(col)} = ?" for col in pk_columns)
+        params = list(changes.values()) + [pk_values[col] for col in pk_columns]
+        cur = con.execute(f"UPDATE {quoted} SET {set_sql} WHERE {where_sql}", params)
+        con.commit()
+
+    return {"ok": True, "updated": cur.rowcount}
 
 
 # ─── CSV Preview (diff kalkulua) ──────────────────────────────────────────────
@@ -567,6 +630,7 @@ APP_JS = r"""
     const state = {
         txapelketak: [], porralariak: [], txirrindulariak: [],
         karrerak: [], emPorra: [], emTxirri: [],
+        dbTables: [], activeTable: "", tableView: {columns: [], rows: [], count: 0},
         sailTab: "porralariak",
         csv: null,           // {raw, headers, rows, type, mapping}
         preview: null,       // {will_insert, already_exists, errors}
@@ -619,6 +683,117 @@ APP_JS = r"""
             }).join("");
             return `<tr>${cells}</tr>`;
         }).join("");
+    }
+
+    async function loadGenericTable(name) {
+        if (!name) return;
+        state.activeTable = name;
+        renderTableNav();
+        const tbody = el("generic-table-tbody");
+        const thead = el("generic-table-thead");
+        if (thead) thead.innerHTML = "";
+        if (tbody) tbody.innerHTML = `<tr><td style="color:var(--muted);padding:18px;text-align:center">Kargatzen...</td></tr>`;
+        try {
+            state.tableView = await api(`/api/table/${encodeURIComponent(name)}`);
+            renderGenericTable();
+        } catch(e) {
+            showToast(e.message, "err");
+            state.tableView = {columns: [], rows: [], count: 0};
+            renderGenericTable();
+        }
+    }
+
+    function renderTableNav() {
+        const wrap = el("table-nav-list");
+        if (!wrap) return;
+        if (!state.dbTables.length) {
+            wrap.innerHTML = `<div class="nav-sub-empty">Ez dago taularik</div>`;
+            return;
+        }
+        wrap.innerHTML = state.dbTables.map(name =>
+            `<div class="nav-item nav-sub-item ${name === state.activeTable ? "active" : ""}" data-table="${esc(name)}">
+                <span class="icon">▦</span> ${esc(name)}
+            </div>`
+        ).join("");
+        wrap.querySelectorAll("[data-table]").forEach(item => {
+            item.addEventListener("click", () => {
+                setSection("taulak");
+                loadGenericTable(item.dataset.table);
+            });
+        });
+    }
+
+    function renderGenericTable() {
+        const title = el("generic-table-title");
+        const count = el("generic-table-count");
+        const search = (el("generic-table-search")?.value || "").trim().toLowerCase();
+        const thead = el("generic-table-thead");
+        const tbody = el("generic-table-tbody");
+        if (!thead || !tbody) return;
+
+        const columns = state.tableView.columns || [];
+        const indexedRows = (state.tableView.rows || []).map((row, index) => ({row, index}));
+        const rows = indexedRows.filter(item =>
+            !search || Object.values(item.row).some(v => String(v ?? "").toLowerCase().includes(search)));
+        const pkCols = columns.filter(c => c.pk).sort((a,b) => Number(a.pk)-Number(b.pk)).map(c => c.name);
+
+        if (title) title.textContent = state.activeTable || "Taulak";
+        if (count) count.textContent = `${rows.length} / ${state.tableView.count || 0} erregistro`;
+
+        if (!columns.length) {
+            thead.innerHTML = "";
+            tbody.innerHTML = `<tr><td style="color:var(--muted);padding:18px;text-align:center">Taula hutsik edo zutaberik gabe</td></tr>`;
+            return;
+        }
+
+        thead.innerHTML = `<tr>${columns.map(c => `<th>${esc(c.name)}${c.pk ? ' <span class="badge">PK</span>' : ""}</th>`).join("")}${pkCols.length ? "<th></th>" : ""}</tr>`;
+        if (!rows.length) {
+            tbody.innerHTML = `<tr><td colspan="${columns.length + (pkCols.length ? 1 : 0)}" style="color:var(--muted);padding:18px;text-align:center">Ez dago erregistrorik</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = rows.map(({row, index}) =>
+            `<tr data-row-index="${index}">${columns.map(c => {
+                const value = row[c.name] ?? "";
+                if (c.pk) return `<td class="pk-cell">${esc(value)}</td>`;
+                return `<td><input class="cell-input" data-col="${esc(c.name)}" value="${esc(value)}"/></td>`;
+            }).join("")}${pkCols.length ? '<td class="row-actions"><button class="btn btn-ghost btn-sm btn-save-row">Gorde</button></td>' : ""}</tr>`
+        ).join("");
+        tbody.querySelectorAll(".btn-save-row").forEach(btn => {
+            btn.addEventListener("click", () => saveGenericRow(btn.closest("tr")));
+        });
+    }
+
+    async function saveGenericRow(rowEl) {
+        if (!rowEl) return;
+        const index = Number(rowEl.dataset.rowIndex);
+        const row = state.tableView.rows[index];
+        const columns = state.tableView.columns || [];
+        const pkCols = columns.filter(c => c.pk).sort((a,b) => Number(a.pk)-Number(b.pk)).map(c => c.name);
+        const pk = {};
+        pkCols.forEach(col => pk[col] = row[col]);
+
+        const values = {};
+        rowEl.querySelectorAll(".cell-input").forEach(input => {
+            values[input.dataset.col] = input.value;
+        });
+
+        const btn = rowEl.querySelector(".btn-save-row");
+        if (btn) { btn.disabled = true; btn.textContent = "Gordetzen..."; }
+        try {
+            const result = await api(`/api/table/${encodeURIComponent(state.activeTable)}/update`, {
+                method: "POST",
+                body: JSON.stringify({pk, values}),
+            });
+            if (!result.updated) {
+                showToast("Ez da lerrorik aldatu", "err");
+            } else {
+                showToast("Lerroa gordeta");
+                await reloadData();
+            }
+        } catch(e) {
+            showToast(e.message, "err");
+            if (btn) { btn.disabled = false; btn.textContent = "Gorde"; }
+        }
     }
 
     function populateSel(selId, items, placeholder, vk, lk, cur = "") {
@@ -694,10 +869,12 @@ APP_JS = r"""
 
     // ── Reload ────────────────────────────────────────────────────────────
     async function reloadData() {
-        const [txapelketak,porralariak,txirrindulariak,karrerak,emPorra,emTxirri] = await Promise.all([
+        const [meta,txapelketak,porralariak,txirrindulariak,karrerak,emPorra,emTxirri] = await Promise.all([
+            api("/api/meta"),
             api("/api/txapelketak"), api("/api/porralariak"), api("/api/txirrindulariak"),
             api("/api/karrerak"), api("/api/emaitzak/porralariak"), api("/api/emaitzak/txirrindulariak"),
         ]);
+        state.dbTables       = Array.isArray(meta?.tables)       ? meta.tables       : [];
         state.txapelketak    = Array.isArray(txapelketak)    ? txapelketak    : [];
         state.porralariak    = Array.isArray(porralariak)    ? porralariak    : [];
         state.txirrindulariak= Array.isArray(txirrindulariak)? txirrindulariak: [];
@@ -713,6 +890,12 @@ APP_JS = r"""
         populateSel("m-karrera-txap", state.txapelketak, "— Aukeratu —",           "Txapelketa_ID", "Izena", curKarr);
 
         renderStats(); renderTxapelketak(); renderKarrerak();
+        renderTableNav();
+        if (!state.activeTable && state.dbTables.length) {
+            await loadGenericTable(state.dbTables[0]);
+        } else if (state.activeTable) {
+            await loadGenericTable(state.activeTable);
+        }
         renderPorralariak(); renderTxirrindulariak();
         renderDashRanking(); renderSailkapenak();
         if (state.csv) renderStep1();
@@ -1157,6 +1340,7 @@ APP_JS = r"""
         el("sail-search")?.addEventListener("input", renderSailkapenak);
         el("porra-search")?.addEventListener("input", renderPorralariak);
         el("txirri-search")?.addEventListener("input", renderTxirrindulariak);
+        el("generic-table-search")?.addEventListener("input", renderGenericTable);
 
         el("m-txap-btn")?.addEventListener("click", e => { e.preventDefault(); addTxapelketa().catch(e=>showToast(e.message,"err")); });
         el("m-porra-btn")?.addEventListener("click", e => { e.preventDefault(); addPorralaria().catch(e=>showToast(e.message,"err")); });
@@ -1253,6 +1437,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/meta":
             self.send_json(db_meta())
 
+        elif path.startswith("/api/table/"):
+            table_name = unquote(path.removeprefix("/api/table/"))
+            self.send_json(read_table(table_name))
+
         elif path == "/app.js":
             body = APP_JS.encode("utf-8")
             self.send_response(200)
@@ -1288,8 +1476,13 @@ class Handler(BaseHTTPRequestHandler):
         data = self.read_json()
 
         try:
+            # ── Generic table edit ───────────────────────────────────────
+            if path.startswith("/api/table/") and path.endswith("/update"):
+                table_name = unquote(path.removeprefix("/api/table/").removesuffix("/update"))
+                self.send_json(update_table_row(table_name, data))
+
             # ── CSV Preview ──────────────────────────────────────────────
-            if path == "/api/csv/preview":
+            elif path == "/api/csv/preview":
                 self.send_json(csv_preview(data))
 
             # ── CSV Import ───────────────────────────────────────────────
