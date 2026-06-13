@@ -591,12 +591,20 @@ function renderCSVSteps() {
 
   const previewStep = `<div class="csv-step-card"><div class="step-label"><span class="step-num">${contextFields.length ? 3 : 2}</span> Aurreikuspen eta inportatu</div>
     <div style="display:flex;gap:8px;margin-bottom:12px">
-      <button class="btn btn-ghost btn-sm" id="btn-csv-preview">🔍 Aurreikusi</button>
-      <button class="btn btn-primary btn-sm" id="btn-csv-import">⬆ Inportatu</button>
+      <button class="btn btn-ghost btn-sm" onclick="doCSVPreview()">🔍 Aurreikusi</button>
+      <button class="btn btn-primary btn-sm" onclick="runFuzzyCheck()">⬆ Inportatu</button>
     </div>
     <div id="csv-preview-result"></div></div>`;
 
+  // Gorde ctx-txap eta ctx-karrera balioak berridazketa aurretik
+  const prevCtxTxap    = el("ctx-txap")?.value    || "";
+  const prevCtxKarrera = el("ctx-karrera")?.value || "";
+
   steps.innerHTML = contextHtml + mapStep + previewStep;
+
+  // Berrezarri hautatutako testuingurua
+  if (prevCtxTxap    && el("ctx-txap"))    el("ctx-txap").value    = prevCtxTxap;
+  if (prevCtxKarrera && el("ctx-karrera")) el("ctx-karrera").value = prevCtxKarrera;
 
   // Build mapping grid
   const FIELD_LABELS = {
@@ -614,9 +622,6 @@ function renderCSVSteps() {
         ${csvHeaders.map(h => `<option value="${esc(h)}" ${h===autoMatch?"selected":""}>${esc(h)}</option>`).join("")}
       </select></div>`;
   }).join("");
-
-  el("btn-csv-preview")?.addEventListener("click", doCSVPreview);
-  el("btn-csv-import")?.addEventListener("click", runFuzzyCheck);
 }
 
 function getMapping() {
@@ -678,14 +683,25 @@ async function doCSVImport() {
   const payload = { profile: type, mapping: getMapping(), rows: csvRows, context: ctx, label: `CSV → ${type}` };
   try {
     const r = await api("/api/csv/import", { method: "POST", body: JSON.stringify(payload) });
+    console.log("Import emaitza:", r);
     if (r.errors.length > 0) {
-      console.warn("CSV erroreak:", r.errors);
       const sample = r.errors.slice(0,3).map(e => e.reason).join(" | ");
       showToast(`⚠️ ${r.inserted} sartu, ${r.skipped} saltatuta, ${r.errors.length} errore: ${sample}`, "err");
     } else {
       showToast(`✅ ${r.inserted} sartu, ${r.skipped} saltatuta`);
     }
     await reloadData();
+    // Inportatu ondoren sailkapenera joan eta txapelketa hautatu
+    if (r.inserted > 0 && ctx["Txapelketa_ID"]) {
+      setSection("sailkapenak");
+      state.sailTab = "txirrindulariak";
+      document.querySelectorAll(".tab[data-sltab]").forEach(t => {
+        t.classList.toggle("active", t.dataset.sltab === "txirrindulariak");
+      });
+      const sailSel = el("sail-txap-sel");
+      if (sailSel) sailSel.value = ctx["Txapelketa_ID"];
+      renderSailkapena();
+    }
   } catch(e) { showToast(e.message, "err"); }
 }
 
@@ -803,8 +819,8 @@ async function doCSVImportWithMergeMap(type, ctx) {
   };
   try {
     const r = await api("/api/csv/import", { method: "POST", body: JSON.stringify(payload) });
+    console.log("Import emaitza (merge):", r);
     if (r.errors.length > 0) {
-      console.warn("CSV erroreak:", r.errors);
       const sample = r.errors.slice(0,3).map(e => e.reason).join(" | ");
       showToast(`⚠️ ${r.inserted} sartu, ${r.skipped} saltatuta, ${r.errors.length} errore: ${sample}`, "err");
     } else {
@@ -812,6 +828,16 @@ async function doCSVImportWithMergeMap(type, ctx) {
     }
     el("csv-preview-result").innerHTML = "";
     await reloadData();
+    if (r.inserted > 0 && ctx["Txapelketa_ID"]) {
+      setSection("sailkapenak");
+      state.sailTab = "txirrindulariak";
+      document.querySelectorAll(".tab[data-sltab]").forEach(t => {
+        t.classList.toggle("active", t.dataset.sltab === "txirrindulariak");
+      });
+      const sailSel = el("sail-txap-sel");
+      if (sailSel) sailSel.value = ctx["Txapelketa_ID"];
+      renderSailkapena();
+    }
   } catch(e) { showToast(e.message, "err"); }
 }
 

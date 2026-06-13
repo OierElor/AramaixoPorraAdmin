@@ -81,13 +81,13 @@ FIELD_ALIASES = {
     "Karrera_ID": ["Karrera_ID", "Karrerak_ID", "Karrera", "Race", "Race_ID"],
     "Karrerak_ID": ["Karrerak_ID", "Karrera_ID"],
     "Ezizena": ["Ezizena", "Porralaria", "Porralari", "Nickname"],
-    "Txirrindularia": ["Txirrindularia", "Izena", "Rider", "Cyclist"],
+    "Txirrindularia": ["Txirrindularia", "Txirrindulari", "Izena", "Rider", "Cyclist", "Name", "Nombre"],
     "Porralaria": ["Porralaria", "Ezizena", "Porralari"],
-    "Posizioa": ["Posizioa", "Sailkapena", "Postua", "Rank"],
-    "Puntuak": ["Puntuak", "Puntu", "Points"],
-    "Urtea": ["Urtea", "Year"],
-    "Izena": ["Izena", "Name", "Title"],
-    "Dortsala": ["Dortsala", "Dorsala", "Bib"],
+    "Posizioa": ["Posizioa", "Sailkapena", "Sailkapen", "Postua", "Rank", "Pos", "Position", "#"],
+    "Puntuak": ["Puntuak", "Puntu", "Points", "Pts", "Ptos"],
+    "Urtea": ["Urtea", "Year", "Año"],
+    "Izena": ["Izena", "Name", "Title", "Nombre"],
+    "Dortsala": ["Dortsala", "Dorsala", "Bib", "Dorsal", "Dors"],
 }
 
 # ─── DB helpers ───────────────────────────────────────────────────────────────
@@ -133,10 +133,18 @@ def _profile_spec(profile_id: str) -> dict | None:
     return CSV_PROFILES.get(profile_id)
 
 def _first_match(raw: dict, names: list[str]):
+    # Lehenengo pasada: zuzeneko match (espazio eta kasu ezikusi)
     for wanted in names:
         for key, value in raw.items():
             if str(key).strip().lower() == wanted.strip().lower():
-                return value
+                return value if value != "" else None
+    # Bigarren pasada: partzial match (key-ak wanted-a dauka)
+    for wanted in names:
+        for key, value in raw.items():
+            k = str(key).strip().lower()
+            w = wanted.strip().lower()
+            if w in k or k in w:
+                return value if value != "" else None
     return None
 
 def _resolve_raw_value(raw: dict, mapping: dict, logical_key: str):
@@ -165,22 +173,52 @@ def _to_int(value):
     return int(text)
 
 def _find_txirrindularia_id(con, name: str):
+    # 1. Match zehatza
     row = con.execute(
         'SELECT Txirrindularia_ID FROM "Txirrindulariak" WHERE Izena = ?', [name],
     ).fetchone()
-    return row[0] if row else None
+    if row:
+        return row[0]
+    # 2. Herrialdea kendu eta saiatu berriro: "ROGLIC Primož (Esl)" -> "ROGLIC Primož"
+    stripped = _strip_country(name)
+    if stripped != name:
+        row = con.execute(
+            'SELECT Txirrindularia_ID FROM "Txirrindulariak" WHERE Izena = ?', [stripped],
+        ).fetchone()
+        if row:
+            return row[0]
+    # 3. Normalizatuta bilatu (kasu eta azentu ezikusi)
+    norm_name = _normalize_name(name)
+    all_rows = con.execute(
+        'SELECT Txirrindularia_ID, Izena FROM "Txirrindulariak"'
+    ).fetchall()
+    for r in all_rows:
+        if _normalize_name(r["Izena"]) == norm_name:
+            return r["Txirrindularia_ID"]
+    # 4. Token-ak ordenatu gabe konparatu (Izena-Abizena vs Abizena-Izena)
+    norm_tokens = frozenset(_normalize_name(name).split())
+    for r in all_rows:
+        if frozenset(_normalize_name(r["Izena"]).split()) == norm_tokens:
+            return r["Txirrindularia_ID"]
+    return None
 
 
 def _normalize_name(name: str) -> str:
     """Izena normalizatu: minuskulak, azentuak kendu, espazio soilik."""
-    import unicodedata
-    n = unicodedata.normalize("NFD", name.strip().lower())
+    import unicodedata, re
+    # Parentesi arteko edukia kendu: "ROGLIC Primoz (Esl)" -> "ROGLIC Primoz"
+    n = re.sub(r"\(.*?\)", "", name).strip()
+    # Normalizatu: minuskulak + azentuak kendu
+    n = unicodedata.normalize("NFD", n.lower())
     n = "".join(c for c in n if unicodedata.category(c) != "Mn")
-    # Parentesi arteko edukia kendu: "ROGLIC Primoz (Esl)" -> "roglic primoz"
-    import re
-    n = re.sub(r"\(.*?\)", "", n).strip()
-    n = re.sub(r"\s+", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
     return n
+
+
+def _strip_country(name: str) -> str:
+    """Herrialdea kendu: 'ROGLIC Primož (Esl)' -> 'ROGLIC Primož'"""
+    import re
+    return re.sub(r"\s*\(.*?\)\s*$", "", name.strip()).strip()
 
 
 def _name_tokens(name: str) -> set:
@@ -262,10 +300,12 @@ def csv_fuzzy_check(payload) -> dict:
 
             exact_id = _find_txirrindularia_id(con, csv_name)
             if exact_id:
-                # Bat-etortze zehatza: ez proposatu
+                # Bat-etortze zehatza edo normalizatua: ez proposatu
                 continue
 
-            suggestions = _find_fuzzy_matches(con, csv_name, threshold=55)
+            # Fuzzy matcherari ere herrialdea kendutako bertsioa pasa
+            clean_name = _strip_country(csv_name)
+            suggestions = _find_fuzzy_matches(con, clean_name, threshold=55)
             results.append({
                 "csv_name": csv_name,
                 "suggestions": suggestions,
@@ -1344,12 +1384,20 @@ function renderCSVSteps() {
 
   const previewStep = `<div class="csv-step-card"><div class="step-label"><span class="step-num">${contextFields.length ? 3 : 2}</span> Aurreikuspen eta inportatu</div>
     <div style="display:flex;gap:8px;margin-bottom:12px">
-      <button class="btn btn-ghost btn-sm" id="btn-csv-preview">🔍 Aurreikusi</button>
-      <button class="btn btn-primary btn-sm" id="btn-csv-import">⬆ Inportatu</button>
+      <button class="btn btn-ghost btn-sm" onclick="doCSVPreview()">🔍 Aurreikusi</button>
+      <button class="btn btn-primary btn-sm" onclick="runFuzzyCheck()">⬆ Inportatu</button>
     </div>
     <div id="csv-preview-result"></div></div>`;
 
+  // Gorde ctx-txap eta ctx-karrera balioak berridazketa aurretik
+  const prevCtxTxap    = el("ctx-txap")?.value    || "";
+  const prevCtxKarrera = el("ctx-karrera")?.value || "";
+
   steps.innerHTML = contextHtml + mapStep + previewStep;
+
+  // Berrezarri hautatutako testuingurua
+  if (prevCtxTxap    && el("ctx-txap"))    el("ctx-txap").value    = prevCtxTxap;
+  if (prevCtxKarrera && el("ctx-karrera")) el("ctx-karrera").value = prevCtxKarrera;
 
   // Build mapping grid
   const FIELD_LABELS = {
@@ -1367,9 +1415,6 @@ function renderCSVSteps() {
         ${csvHeaders.map(h => `<option value="${esc(h)}" ${h===autoMatch?"selected":""}>${esc(h)}</option>`).join("")}
       </select></div>`;
   }).join("");
-
-  el("btn-csv-preview")?.addEventListener("click", doCSVPreview);
-  el("btn-csv-import")?.addEventListener("click", runFuzzyCheck);
 }
 
 function getMapping() {
@@ -1431,14 +1476,25 @@ async function doCSVImport() {
   const payload = { profile: type, mapping: getMapping(), rows: csvRows, context: ctx, label: `CSV → ${type}` };
   try {
     const r = await api("/api/csv/import", { method: "POST", body: JSON.stringify(payload) });
+    console.log("Import emaitza:", r);
     if (r.errors.length > 0) {
-      console.warn("CSV erroreak:", r.errors);
       const sample = r.errors.slice(0,3).map(e => e.reason).join(" | ");
       showToast(`⚠️ ${r.inserted} sartu, ${r.skipped} saltatuta, ${r.errors.length} errore: ${sample}`, "err");
     } else {
       showToast(`✅ ${r.inserted} sartu, ${r.skipped} saltatuta`);
     }
     await reloadData();
+    // Inportatu ondoren sailkapenera joan eta txapelketa hautatu
+    if (r.inserted > 0 && ctx["Txapelketa_ID"]) {
+      setSection("sailkapenak");
+      state.sailTab = "txirrindulariak";
+      document.querySelectorAll(".tab[data-sltab]").forEach(t => {
+        t.classList.toggle("active", t.dataset.sltab === "txirrindulariak");
+      });
+      const sailSel = el("sail-txap-sel");
+      if (sailSel) sailSel.value = ctx["Txapelketa_ID"];
+      renderSailkapena();
+    }
   } catch(e) { showToast(e.message, "err"); }
 }
 
@@ -1556,8 +1612,8 @@ async function doCSVImportWithMergeMap(type, ctx) {
   };
   try {
     const r = await api("/api/csv/import", { method: "POST", body: JSON.stringify(payload) });
+    console.log("Import emaitza (merge):", r);
     if (r.errors.length > 0) {
-      console.warn("CSV erroreak:", r.errors);
       const sample = r.errors.slice(0,3).map(e => e.reason).join(" | ");
       showToast(`⚠️ ${r.inserted} sartu, ${r.skipped} saltatuta, ${r.errors.length} errore: ${sample}`, "err");
     } else {
@@ -1565,6 +1621,16 @@ async function doCSVImportWithMergeMap(type, ctx) {
     }
     el("csv-preview-result").innerHTML = "";
     await reloadData();
+    if (r.inserted > 0 && ctx["Txapelketa_ID"]) {
+      setSection("sailkapenak");
+      state.sailTab = "txirrindulariak";
+      document.querySelectorAll(".tab[data-sltab]").forEach(t => {
+        t.classList.toggle("active", t.dataset.sltab === "txirrindulariak");
+      });
+      const sailSel = el("sail-txap-sel");
+      if (sailSel) sailSel.value = ctx["Txapelketa_ID"];
+      renderSailkapena();
+    }
   } catch(e) { showToast(e.message, "err"); }
 }
 
