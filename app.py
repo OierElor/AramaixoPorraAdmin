@@ -170,6 +170,109 @@ def _find_txirrindularia_id(con, name: str):
     ).fetchone()
     return row[0] if row else None
 
+
+def _normalize_name(name: str) -> str:
+    """Izena normalizatu: minuskulak, azentuak kendu, espazio soilik."""
+    import unicodedata
+    n = unicodedata.normalize("NFD", name.strip().lower())
+    n = "".join(c for c in n if unicodedata.category(c) != "Mn")
+    # Parentesi arteko edukia kendu: "ROGLIC Primoz (Esl)" -> "roglic primoz"
+    import re
+    n = re.sub(r"\(.*?\)", "", n).strip()
+    n = re.sub(r"\s+", " ", n)
+    return n
+
+
+def _name_tokens(name: str) -> set:
+    return set(_normalize_name(name).split())
+
+
+def _fuzzy_name_score(a: str, b: str) -> int:
+    """0-100 antzekotasun-puntuazioa bi izenen artean."""
+    na, nb = _normalize_name(a), _normalize_name(b)
+    if na == nb:
+        return 100
+    # Token-ak ordenatu eta konparatu (abizena-izena vs izena-abizena)
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if ta == tb:
+        return 98  # Token berdinak, ordena desberdina
+    inter = ta & tb
+    union = ta | tb
+    if not union:
+        return 0
+    jaccard = len(inter) / len(union)
+    # Ia token guztiak bat badatoz puntuazio altua
+    if len(inter) >= min(len(ta), len(tb)):
+        return max(85, int(jaccard * 100))
+    # Bigram similarity
+    def bigrams(s):
+        return set(s[i:i+2] for i in range(len(s)-1))
+    ba, bb = bigrams(na), bigrams(nb)
+    denom = len(ba) + len(bb)
+    if denom == 0:
+        return 0
+    common = len(ba & bb)
+    bigram_score = int(2 * common / denom * 100)
+    return max(int(jaccard * 70), bigram_score)
+
+
+def _find_fuzzy_matches(con, name: str, threshold: int = 60) -> list:
+    """DB-ko txirrindulari antzekoak bilatu."""
+    all_riders = con.execute(
+        'SELECT Txirrindularia_ID, Izena FROM "Txirrindulariak"'
+    ).fetchall()
+    matches = []
+    for row in all_riders:
+        score = _fuzzy_name_score(name, row["Izena"])
+        if score >= threshold:
+            matches.append({
+                "Txirrindularia_ID": row["Txirrindularia_ID"],
+                "Izena": row["Izena"],
+                "score": score,
+            })
+    matches.sort(key=lambda x: -x["score"])
+    return matches[:5]
+
+
+def csv_fuzzy_check(payload) -> dict:
+    """
+    CSV lerro guztietarako txirrindulari-izen bakoitzaren antzekoak bilatu.
+    Itzultzen du: zerrenda bat {csv_name, exact_match, suggestions}
+    """
+    profile = payload.get("profile", "")
+    mapping = payload.get("mapping", {})
+    raw     = payload.get("rows", [])
+    context = payload.get("context", {})
+
+    if profile not in ("txirrindulari_emaitzak", "karrera_txirrindulari_emaitzak"):
+        return {"checks": []}
+
+    results = []
+    seen_names = set()
+
+    with get_db() as con:
+        for raw_row in raw:
+            norm = _normalize_row(profile, mapping, raw_row, context, con, create_missing=False)
+            if norm is None:
+                continue
+            csv_name = norm.get("Txirrindularia", "")
+            if not csv_name or csv_name in seen_names:
+                continue
+            seen_names.add(csv_name)
+
+            exact_id = _find_txirrindularia_id(con, csv_name)
+            if exact_id:
+                # Bat-etortze zehatza: ez proposatu
+                continue
+
+            suggestions = _find_fuzzy_matches(con, csv_name, threshold=55)
+            results.append({
+                "csv_name": csv_name,
+                "suggestions": suggestions,
+            })
+
+    return {"checks": results}
+
 def _ensure_txirrindularia_id(con, name: str) -> int:
     tid = _find_txirrindularia_id(con, name)
     if tid is not None:
@@ -262,8 +365,10 @@ def _normalize_row(profile_id, mapping, raw, context=None, con=None, create_miss
         posizioa = _to_int(get("Posizioa"))
         txirr_name = get("Txirrindularia")
         puntuak = _to_int(get("Puntuak"))
-        if txap_id is None or posizioa is None or not txirr_name or puntuak is None:
+        if txap_id is None or posizioa is None or not txirr_name:
             return None
+        if puntuak is None:
+            puntuak = 0  # Puntuak falta bada 0 erabili errore baten ordez
         norm = {"Txapelketa_ID": txap_id, "Posizioa": posizioa, "Txirrindularia": txirr_name, "Puntuak": puntuak}
         dortsala = get("Dortsala")
         if dortsala not in (None, ""):
@@ -452,11 +557,13 @@ def csv_preview(payload):
     return {"will_insert": will_insert, "already_exists": already_exists, "errors": errors}
 
 def csv_import(payload):
-    profile = payload.get("profile") or payload.get("table", "")
-    mapping = payload.get("mapping", {})
-    raw     = payload.get("rows", [])
-    context = payload.get("context", {})
-    label   = payload.get("label", f"CSV → {profile}")
+    profile   = payload.get("profile") or payload.get("table", "")
+    mapping   = payload.get("mapping", {})
+    raw       = payload.get("rows", [])
+    context   = payload.get("context", {})
+    label     = payload.get("label", f"CSV → {profile}")
+    # merge_map: {csv_name: txirrindularia_id} - erabiltzaileak erabakitako fusio-map
+    merge_map: dict = payload.get("merge_map", {})
     spec = _profile_spec(profile)
     if not spec:
         return {"inserted": 0, "skipped": 0, "errors": [{"row": {}, "reason": f"CSV profila ezezaguna: {profile}"}], "batch_id": len(_undo_stack)}
@@ -470,6 +577,16 @@ def csv_import(payload):
             if norm is None:
                 errors.append({"row": raw_row, "reason": "Eremu batzuk falta dira"})
                 continue
+            # merge_map: CSV-ko izen bat DB-ko ID bati lotuta badago, ID hori erabili
+            if merge_map and "Txirrindularia" in norm:
+                csv_name = norm["Txirrindularia"]
+                if csv_name in merge_map:
+                    mapped_id = merge_map[csv_name]
+                    if mapped_id is None:
+                        # Erabiltzaileak "berri gisa sartu" aukeratu du
+                        pass
+                    else:
+                        norm["Txirrindularia_ID"] = int(mapped_id)
             exists, _ = _row_exists(con, profile, norm)
             if exists:
                 skipped += 1
@@ -767,6 +884,7 @@ APP_HTML = r"""<!doctype html>
     <div class="nav-item" data-section="add-manual"><span class="icon">✏️</span> Eskuz sartu</div>
     <div class="nav-item" data-section="add-csv"><span class="icon">📂</span> CSV inportatu</div>
     <div class="nav-item" data-section="merge"><span class="icon">🔀</span> Fusionatu</div>
+    <div class="nav-item" data-section="ezizenak"><span class="icon">🏷️</span> Ezizenak lotu</div>
   </nav>
   <main class="main">
 
@@ -866,6 +984,26 @@ Tour De France,2026</pre></div>
       </div>
     </section>
 
+    <!-- EZIZENAK LOTU -->
+    <section class="section" id="sec-ezizenak">
+      <div class="page-header"><div><div class="page-title">🏷️ Ezizenak lotu</div><div class="page-sub">Ezizen bakoitza porralari bati esleitu</div></div></div>
+      <div class="card">
+        <div class="toolbar">
+          <input class="search-input" id="ezizen-search" placeholder="Bilatu ezizena edo txapelketa..."/>
+          <select class="filter-sel" id="ezizen-filter" style="min-width:160px">
+            <option value="">Guztiak</option>
+            <option value="lotu-gabe">Lotu gabekoak</option>
+            <option value="lotuta">Lotutakoak</option>
+          </select>
+          <span style="color:var(--muted);font-size:12px" id="ezizen-count"></span>
+        </div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Ezizena</th><th>Txapelketa</th><th>Porralaria</th><th style="width:200px">Esleitu</th></tr></thead>
+          <tbody id="ezizen-tbody"></tbody>
+        </table></div>
+      </div>
+    </section>
+
     <!-- FUSIONATU -->
     <section class="section" id="sec-merge">
       <div class="page-header"><div><div class="page-title">🔀 Fusionatu</div><div class="page-sub">Bikoiztutako txirrindulariak edo porralariak bat egin</div></div></div>
@@ -899,6 +1037,7 @@ Tour De France,2026</pre></div>
 const state = {
   txirrindulariak: [], porralariak: [], txapelketak: [], karrerak: [],
   txirriEmaitzak: [], porraEmaitzak: [], karreraSailkapena: [],
+  ezizenak: [],
   currentTable: null, currentTableData: null,
   sailTab: "porralariak",
 };
@@ -928,6 +1067,7 @@ function setSection(id) {
   if (sec) sec.classList.add("active");
   document.querySelector(`.nav-item[data-section="${id}"]`)?.classList.add("active");
   if (id === "merge") renderMergeSection();
+  if (id === "ezizenak") loadEzizenak();
 }
 
 document.querySelectorAll(".nav-item[data-section]").forEach(item => {
@@ -956,6 +1096,7 @@ async function reloadData() {
   renderSailTxapSel(); renderSailkapena(); renderUndoList(undoSt);
   if (state.currentTable) loadGenericTable(state.currentTable);
   if (el("sec-merge")?.classList.contains("active")) renderMergeSection();
+  if (el("sec-ezizenak")?.classList.contains("active")) renderEzizenak();
 }
 
 // ── Stats ────────────────────────────────────────────────────────────────────
@@ -1228,7 +1369,7 @@ function renderCSVSteps() {
   }).join("");
 
   el("btn-csv-preview")?.addEventListener("click", doCSVPreview);
-  el("btn-csv-import")?.addEventListener("click", doCSVImport);
+  el("btn-csv-import")?.addEventListener("click", runFuzzyCheck);
 }
 
 function getMapping() {
@@ -1246,33 +1387,183 @@ function getMapping() {
 
 function getContext() {
   const ctx = {};
-  const txap = el("ctx-txap"); if (txap?.value) ctx["Txapelketa_ID"] = Number(txap.value);
-  const karrera = el("ctx-karrera"); if (karrera?.value) ctx["Karrera_ID"] = Number(karrera.value);
+  const txap = el("ctx-txap");
+  if (txap?.value && txap.value !== "") ctx["Txapelketa_ID"] = Number(txap.value);
+  const karrera = el("ctx-karrera");
+  if (karrera?.value && karrera.value !== "") ctx["Karrera_ID"] = Number(karrera.value);
   return ctx;
 }
 
 async function doCSVPreview() {
   const type = el("csv-type")?.value || "";
-  const payload = { profile: type, mapping: getMapping(), rows: csvRows, context: getContext() };
+  const ctx = getContext();
+  // Testuingurua behar duten profilak egiaztatu
+  const needsTxap = ["txirrindulari_emaitzak","porralari_emaitzak","karrerak"].includes(type);
+  const needsKarrera = ["karrera_txirrindulari_emaitzak"].includes(type);
+  if (needsTxap && !ctx["Txapelketa_ID"]) return showToast("Txapelketa bat hautatu ezinbestekoa da", "err");
+  if (needsKarrera && !ctx["Karrera_ID"])  return showToast("Karrera bat hautatu ezinbestekoa da", "err");
+  const payload = { profile: type, mapping: getMapping(), rows: csvRows, context: ctx };
   try {
     const r = await api("/api/csv/preview", { method: "POST", body: JSON.stringify(payload) });
     const res = el("csv-preview-result");
     const total = r.will_insert.length + r.already_exists.length + r.errors.length;
+    const errHtml = r.errors.length
+      ? `<div style="margin-top:10px;padding:10px;background:rgba(230,57,70,.08);border:1px solid rgba(230,57,70,.3);border-radius:7px;font-size:12px;color:var(--accent)">
+          <strong>Lehen erroreak:</strong><br>
+          ${r.errors.slice(0,5).map(e => `• ${esc(JSON.stringify(e.row).slice(0,60))} → ${esc(e.reason)}`).join("<br>")}
+         </div>` : "";
     res.innerHTML = `<div class="diff-summary">
       <div class="diff-stat">📄 <strong>${total}</strong> lerro total</div>
       <div class="diff-stat" style="color:#4ade80">✅ <strong>${r.will_insert.length}</strong> sartuko dira</div>
       <div class="diff-stat" style="color:var(--accent2)">⚠️ <strong>${r.already_exists.length}</strong> jada daude</div>
       <div class="diff-stat" style="color:var(--accent)">❌ <strong>${r.errors.length}</strong> errore</div>
-    </div>`;
+    </div>${errHtml}`;
   } catch(e) { showToast(e.message, "err"); }
 }
 
 async function doCSVImport() {
   const type = el("csv-type")?.value || "";
-  const payload = { profile: type, mapping: getMapping(), rows: csvRows, context: getContext(), label: `CSV → ${type}` };
+  const ctx = getContext();
+  const needsTxap = ["txirrindulari_emaitzak","porralari_emaitzak","karrerak"].includes(type);
+  const needsKarrera = ["karrera_txirrindulari_emaitzak"].includes(type);
+  if (needsTxap && !ctx["Txapelketa_ID"]) return showToast("Txapelketa bat hautatu ezinbestekoa da", "err");
+  if (needsKarrera && !ctx["Karrera_ID"])  return showToast("Karrera bat hautatu ezinbestekoa da", "err");
+  const payload = { profile: type, mapping: getMapping(), rows: csvRows, context: ctx, label: `CSV → ${type}` };
   try {
     const r = await api("/api/csv/import", { method: "POST", body: JSON.stringify(payload) });
-    showToast(`✅ ${r.inserted} sartu, ${r.skipped} saltatuta, ${r.errors.length} errore`);
+    if (r.errors.length > 0) {
+      console.warn("CSV erroreak:", r.errors);
+      const sample = r.errors.slice(0,3).map(e => e.reason).join(" | ");
+      showToast(`⚠️ ${r.inserted} sartu, ${r.skipped} saltatuta, ${r.errors.length} errore: ${sample}`, "err");
+    } else {
+      showToast(`✅ ${r.inserted} sartu, ${r.skipped} saltatuta`);
+    }
+    await reloadData();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+// ── CSV Fuzzy Check ──────────────────────────────────────────────────────────
+// mergeMap: { csv_name -> txirrindularia_id | null }
+// null = berri gisa sartu, id = DB-ko txirrindulari horrekin fusionatu
+const mergeMap = {};
+
+async function runFuzzyCheck() {
+  const type = el("csv-type")?.value || "";
+  if (!["txirrindulari_emaitzak", "karrera_txirrindulari_emaitzak"].includes(type)) {
+    // Profil honentzat fuzzy check ez da beharrezkoa
+    return doCSVImport();
+  }
+  const ctx = getContext();
+  const needsTxap = ["txirrindulari_emaitzak"].includes(type);
+  const needsKarrera = ["karrera_txirrindulari_emaitzak"].includes(type);
+  if (needsTxap && !ctx["Txapelketa_ID"]) return showToast("Txapelketa bat hautatu ezinbestekoa da", "err");
+  if (needsKarrera && !ctx["Karrera_ID"])  return showToast("Karrera bat hautatu ezinbestekoa da", "err");
+
+  const payload = { profile: type, mapping: getMapping(), rows: csvRows, context: ctx };
+  try {
+    const r = await api("/api/csv/fuzzy-check", { method: "POST", body: JSON.stringify(payload) });
+    if (!r.checks || r.checks.length === 0) {
+      // Proposamenik ez → zuzenean inportatu
+      return doCSVImport();
+    }
+    renderFuzzyCheckUI(r.checks, type, ctx);
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+function renderFuzzyCheckUI(checks, type, ctx) {
+  // Garbitu mergeMap
+  Object.keys(mergeMap).forEach(k => delete mergeMap[k]);
+
+  const wrap = el("csv-preview-result");
+  const rows = checks.map(c => {
+    const sugs = c.suggestions;
+    const nameEsc = esc(c.csv_name);
+    const sugOpts = sugs.map(s =>
+      `<option value="${s.Txirrindularia_ID}">${esc(s.Izena)} (${s.score}%)</option>`
+    ).join("");
+    const mergePart = sugs.length ? `
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+            <input type="radio" name="fz-${nameEsc}" value="merge"
+              onchange="fuzzyChoice(this.closest('[data-csv]').dataset.csv, 'merge', null)">
+            <span>🔀 Fusionatu honekin:</span>
+          </label>
+          <select id="fzsel-${nameEsc}"
+            style="margin-left:22px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none"
+            onchange="fuzzyChoice(this.closest('[data-csv]').dataset.csv, 'merge', this.value)">
+            ${sugOpts}
+          </select>` : `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-left:4px">Proposamenik ez — berri gisa sartuko da</div>`;
+    return `
+    <div data-csv="${nameEsc}" style="padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--bg)">
+      <div style="margin-bottom:8px">
+        <span style="font-size:12px;color:var(--muted)">CSV-n:</span>
+        <span style="font-size:14px;font-weight:700;color:var(--accent2);margin-left:6px">${nameEsc}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="fz-${nameEsc}" value="new" checked
+            onchange="fuzzyChoice(this.closest('[data-csv]').dataset.csv, 'new', null)">
+          <span>✨ Berri gisa sartu</span>
+        </label>
+        ${mergePart}
+      </div>
+    </div>`;
+  }).join("");
+
+  wrap.innerHTML = `
+    <div class="csv-step-card" style="margin-top:12px">
+      <div class="step-label"><span class="step-num">!</span> Txirrindulari antzekoak aurkitu dira</div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:14px">
+        Ondorengo txirrindulariak ez dira aurkitu DB-an baina antzeko izenak daude. Bakoitzarentzat erabaki:
+      </p>
+      <div id="fuzzy-rows">${rows}</div>
+      <div style="display:flex;gap:10px;margin-top:14px">
+        <button class="btn btn-primary" id="btn-fuzzy-confirm">⬆ Inportatu erabakiekin</button>
+        <button class="btn btn-ghost" onclick="el('csv-preview-result').innerHTML=''">Utzi</button>
+      </div>
+    </div>`;
+
+  // Hasierako egoera: denak "new"
+  checks.forEach(c => { mergeMap[c.csv_name] = null; });
+
+  el("btn-fuzzy-confirm")?.addEventListener("click", () => doCSVImportWithMergeMap(type, ctx));
+}
+
+function fuzzyChoice(csv_name, mode, sel_val) {
+  if (mode === "new") {
+    mergeMap[csv_name] = null;
+    // Ziurtatu radio "new" markatuta dagoela
+    const radio = document.querySelector(`input[name="fz-${esc(csv_name)}"][value="new"]`);
+    if (radio) radio.checked = true;
+  } else {
+    // "merge" modua: select-eko balioa hartu
+    const selEl = el("fzsel-" + esc(csv_name));
+    const val = sel_val || selEl?.value;
+    mergeMap[csv_name] = val ? Number(val) : null;
+    // Radio "merge" markatu
+    const radio = document.querySelector(`input[name="fz-${esc(csv_name)}"][value="merge"]`);
+    if (radio) radio.checked = true;
+  }
+}
+
+async function doCSVImportWithMergeMap(type, ctx) {
+  const payload = {
+    profile: type,
+    mapping: getMapping(),
+    rows: csvRows,
+    context: ctx,
+    label: `CSV → ${type}`,
+    merge_map: mergeMap,
+  };
+  try {
+    const r = await api("/api/csv/import", { method: "POST", body: JSON.stringify(payload) });
+    if (r.errors.length > 0) {
+      console.warn("CSV erroreak:", r.errors);
+      const sample = r.errors.slice(0,3).map(e => e.reason).join(" | ");
+      showToast(`⚠️ ${r.inserted} sartu, ${r.skipped} saltatuta, ${r.errors.length} errore: ${sample}`, "err");
+    } else {
+      showToast(`✅ ${r.inserted} sartu, ${r.skipped} saltatuta`);
+    }
+    el("csv-preview-result").innerHTML = "";
     await reloadData();
   } catch(e) { showToast(e.message, "err"); }
 }
@@ -1294,6 +1585,76 @@ function renderUndoList(st) {
   )].join("");
 }
 
+// ── Ezizenak lotu ────────────────────────────────────────────────────────────
+async function loadEzizenak() {
+  try {
+    const data = await api("/api/ezizenak");
+    state.ezizenak = data;
+    renderEzizenak();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+function renderEzizenak() {
+  const data = state.ezizenak || [];
+  const q      = (el("ezizen-search")?.value || "").toLowerCase();
+  const filter = el("ezizen-filter")?.value || "";
+
+  let filtered = data.filter(r => {
+    if (q && !(r.Ezizena||"").toLowerCase().includes(q) && !(r.Txapelketa||"").toLowerCase().includes(q)) return false;
+    if (filter === "lotu-gabe" && r.Porralaria_ID) return false;
+    if (filter === "lotuta"    && !r.Porralaria_ID) return false;
+    return true;
+  });
+
+  el("ezizen-count").textContent = filtered.length + " ezizen";
+
+  const porrOpts = (state.porralariak || [])
+    .map(p => `<option value="${p.Porralaria_ID}">${esc(p.Izena)}</option>`)
+    .join("");
+
+  el("ezizen-tbody").innerHTML = filtered.map(r => {
+    const lotuBadge = r.Porralaria_ID
+      ? `<span style="color:#4ade80;font-weight:600">${esc(r.Porralaria)}</span>`
+      : `<span style="color:var(--muted);font-size:12px">Lotu gabe</span>`;
+    return `<tr>
+      <td style="font-weight:600">${esc(r.Ezizena)}</td>
+      <td style="color:var(--muted);font-size:12px">${esc(r.Txapelketa||"")}</td>
+      <td>${lotuBadge}</td>
+      <td>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="porra-sel-${r.Ezizen_ID}" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none">
+            <option value="">— Hautatu —</option>
+            ${porrOpts}
+          </select>
+          <button class="btn btn-sm btn-primary" onclick="lotuegin(${r.Ezizen_ID})">Lotu</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="4" style="color:var(--muted);padding:24px;text-align:center">Ez dago emaitzarik</td></tr>`;
+
+  // Jarri aukeratuta jada lotutakoa
+  filtered.forEach(r => {
+    if (r.Porralaria_ID) {
+      const sel = el("porra-sel-" + r.Ezizen_ID);
+      if (sel) sel.value = r.Porralaria_ID;
+    }
+  });
+}
+
+async function lotuegin(ezizen_id) {
+  const sel = el("porra-sel-" + ezizen_id);
+  const porralaria_id = sel?.value;
+  if (!porralaria_id) return showToast("Porralaria bat hautatu", "err");
+  try {
+    await api("/api/ezizen-lotu", {
+      method: "POST",
+      body: JSON.stringify({ ezizen_id: Number(ezizen_id), porralaria_id: Number(porralaria_id) }),
+    });
+    showToast("✅ Ezizena lotuta");
+    await loadEzizenak();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
 // ── Merge ─────────────────────────────────────────────────────────────────────
 function renderMergeSection() {
   const kind   = el("merge-kind")?.value || "txirrindulariak";
@@ -1301,16 +1662,36 @@ function renderMergeSection() {
   const list   = kind === "txirrindulariak" ? state.txirrindulariak : state.porralariak;
   const idKey  = kind === "txirrindulariak" ? "Txirrindularia_ID" : "Porralaria_ID";
 
-  const filtered = search ? list.filter(r => (r.Izena||"").toLowerCase().includes(search)) : list;
-  const makeOpts = sel => `<option value="">— Hautatu —</option>` +
-    filtered.map(r => `<option value="${r[idKey]}" ${sel===String(r[idKey])?"selected":""}>${esc(r.Izena)} (ID: ${r[idKey]})</option>`).join("");
-
+  // Gorde aukeratutako balioak AURRETIK
   const keepSel = el("merge-keep-sel");
   const dropSel = el("merge-drop-sel");
-  const prevKeep = keepSel?.value, prevDrop = dropSel?.value;
+  const prevKeep = keepSel?.value || "";
+  const prevDrop = dropSel?.value || "";
+
+  // Filtratu baina hautatutako elementuak beti sartu zerrendan
+  const filtered = search ? list.filter(r => (r.Izena||"").toLowerCase().includes(search)) : list;
+
+  // Hautatutakoak baina filtratuan ez daudenak gehitu
+  const filteredIds = new Set(filtered.map(r => String(r[idKey])));
+  const extras = [];
+  if (prevKeep && !filteredIds.has(prevKeep)) {
+    const found = list.find(r => String(r[idKey]) === prevKeep);
+    if (found) extras.push(found);
+  }
+  if (prevDrop && !filteredIds.has(prevDrop)) {
+    const found = list.find(r => String(r[idKey]) === prevDrop);
+    if (found) extras.push(found);
+  }
+
+  const finalList = [...filtered, ...extras];
+
+  const makeOpts = sel => `<option value="">— Hautatu —</option>` +
+    finalList.map(r => `<option value="${r[idKey]}" ${sel===String(r[idKey])?"selected":""}>${esc(r.Izena)} (ID: ${r[idKey]})</option>`).join("");
+
   if (keepSel) keepSel.innerHTML = makeOpts(prevKeep);
   if (dropSel) dropSel.innerHTML = makeOpts(prevDrop);
 }
+
 
 async function runMergePreview() {
   const kind    = el("merge-kind")?.value || "txirrindulariak";
@@ -1445,6 +1826,8 @@ async function init() {
   el("generic-table-search")?.addEventListener("input", renderGenericTable);
   el("dash-txap-sel")?.addEventListener("change", e => renderDashRanking(e.target.value));
   el("csv-type")?.addEventListener("change", renderCSVSteps);
+  el("ezizen-search")?.addEventListener("input", renderEzizenak);
+  el("ezizen-filter")?.addEventListener("change", renderEzizenak);
 
   document.querySelectorAll(".tab[data-sltab]").forEach(t => {
     t.addEventListener("click", () => {
@@ -1543,6 +1926,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(rows(con,
                     'SELECT ks.*, t.Izena AS Txirrindularia FROM "KarreraSailkapena" ks '
                     'JOIN "Txirrindulariak" t ON ks.Txirrindularia_ID = t.Txirrindularia_ID ORDER BY ks.Karrera_ID, ks.Puntuak DESC'))
+            if path == "/api/ezizenak":
+                return self.send_json(rows(con,
+                    'SELECT ez.Ezizen_ID, ez.Ezizena, ez.Txapelketa_ID, '
+                    't.Izena AS Txapelketa, ep.Porralaria_ID, p.Izena AS Porralaria '
+                    'FROM "PorralariEzizenak" ez '
+                    'LEFT JOIN "Txapelketak" t ON ez.Txapelketa_ID = t.Txapelketa_ID '
+                    'LEFT JOIN "EzizenPorralariak" ep ON ez.Ezizen_ID = ep.Ezizen_ID '
+                    'LEFT JOIN "Porralariak" p ON ep.Porralaria_ID = p.Porralaria_ID '
+                    'ORDER BY t.Urtea DESC, ez.Ezizena'))
             if path == "/api/meta":
                 return self.send_json(db_meta())
             if path == "/api/undo-state":
@@ -1584,6 +1976,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self.send_error_json(str(e))
 
+        elif path == "/api/csv/fuzzy-check":
+            return self.send_json(csv_fuzzy_check(data))
+
         elif path == "/api/csv/preview":
             return self.send_json(csv_preview(data))
 
@@ -1595,6 +1990,33 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/redo":
             return self.send_json(do_redo())
+
+        elif path == "/api/ezizen-lotu":
+            # Ezizen bat porralari bati lotu EzizenPorralariak taulan
+            ezizen_id  = data.get("ezizen_id")
+            porralaria_id = data.get("porralaria_id")
+            if not ezizen_id or not porralaria_id:
+                return self.send_error_json("ezizen_id eta porralaria_id behar dira")
+            try:
+                with get_db() as con:
+                    # Begiratu jada ba ote dagoen
+                    existing = con.execute(
+                        'SELECT * FROM "EzizenPorralariak" WHERE Ezizen_ID = ?', [ezizen_id]
+                    ).fetchone()
+                    if existing:
+                        con.execute(
+                            'UPDATE "EzizenPorralariak" SET Porralaria_ID = ? WHERE Ezizen_ID = ?',
+                            [porralaria_id, ezizen_id]
+                        )
+                    else:
+                        con.execute(
+                            'INSERT INTO "EzizenPorralariak" (Ezizen_ID, Porralaria_ID) VALUES (?, ?)',
+                            [ezizen_id, porralaria_id]
+                        )
+                    con.commit()
+                return self.send_json({"ok": True})
+            except Exception as e:
+                return self.send_error_json(str(e))
 
         elif path == "/api/merge/preview":
             kind    = data.get("kind", "")
