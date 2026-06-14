@@ -197,7 +197,12 @@
 
     <!-- ESKUZ SARTU -->
     <section class="section" id="sec-add-manual">
-      <div class="page-header"><div><div class="page-title">✏️ Eskuz sartu</div><div class="page-sub">Erregistro berriak gehitu</div></div></div>
+      <div class="page-header">
+        <div><div class="page-title">✏️ Eskuz sartu</div><div class="page-sub">Erregistro berriak gehitu</div></div>
+        <button class="btn btn-ghost" onclick="normalizeIzenak()" style="align-self:flex-start">
+          🔤 Formatua normalizatu
+        </button>
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
         <div class="card"><div class="card-head"><div class="card-title">Txapelketa berria</div></div><div class="card-body"><div class="form-grid"><div class="field"><label>Izena</label><input id="m-txap-izena" placeholder="Tour de France"/></div><div class="field"><label>Urtea</label><input id="m-txap-urtea" type="number" placeholder="2025"/></div></div><div style="margin-top:14px"><button class="btn btn-primary" id="m-txap-btn">Gehitu txapelketa</button></div></div></div>
         <div class="card"><div class="card-head"><div class="card-title">Porralaria berria</div></div><div class="card-body"><div class="form-grid full"><div class="field"><label>Izena</label><input id="m-porra-izena" placeholder="Porralari izena"/></div></div><div style="margin-top:14px"><button class="btn btn-primary" id="m-porra-btn">Gehitu porralaria</button></div></div></div>
@@ -713,102 +718,169 @@ const mergeMap = {};
 async function runFuzzyCheck() {
   const type = el("csv-type")?.value || "";
   if (!["txirrindulari_emaitzak", "karrera_txirrindulari_emaitzak"].includes(type)) {
-    // Profil honentzat fuzzy check ez da beharrezkoa
     return doCSVImport();
   }
   const ctx = getContext();
-  const needsTxap = ["txirrindulari_emaitzak"].includes(type);
-  const needsKarrera = ["karrera_txirrindulari_emaitzak"].includes(type);
-  if (needsTxap && !ctx["Txapelketa_ID"]) return showToast("Txapelketa bat hautatu ezinbestekoa da", "err");
-  if (needsKarrera && !ctx["Karrera_ID"])  return showToast("Karrera bat hautatu ezinbestekoa da", "err");
+  if (["txirrindulari_emaitzak"].includes(type) && !ctx["Txapelketa_ID"])
+    return showToast("Txapelketa bat hautatu ezinbestekoa da", "err");
+  if (["karrera_txirrindulari_emaitzak"].includes(type) && !ctx["Karrera_ID"])
+    return showToast("Karrera bat hautatu ezinbestekoa da", "err");
 
-  const payload = { profile: type, mapping: getMapping(), rows: csvRows, context: ctx };
+  const btn = document.querySelector('[onclick="runFuzzyCheck()"]');
+  if (btn) { btn.disabled = true; btn.textContent = "Kargatzen..."; }
   try {
-    const r = await api("/api/csv/fuzzy-check", { method: "POST", body: JSON.stringify(payload) });
-    if (!r.checks || r.checks.length === 0) {
-      // Proposamenik ez → zuzenean inportatu
-      return doCSVImport();
-    }
+    const r = await api("/api/csv/fuzzy-check", { method: "POST", body: JSON.stringify(
+      { profile: type, mapping: getMapping(), rows: csvRows, context: ctx }
+    )});
+    if (!r.checks || r.checks.length === 0) return doCSVImport();
     renderFuzzyCheckUI(r.checks, type, ctx);
   } catch(e) { showToast(e.message, "err"); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = "⬆ Inportatu"; } }
 }
 
 function renderFuzzyCheckUI(checks, type, ctx) {
-  // Garbitu mergeMap
   Object.keys(mergeMap).forEach(k => delete mergeMap[k]);
+  checks.forEach(c => { mergeMap[c.csv_name] = c.matched_id ?? null; });
+
+  // ctx gorde global gisa inportatzean erabiltzeko
+  window._fzType = type;
+  window._fzCtx  = ctx;
 
   const wrap = el("csv-preview-result");
-  const rows = checks.map(c => {
-    const sugs = c.suggestions;
-    const nameEsc = esc(c.csv_name);
-    const sugOpts = sugs.map(s =>
-      `<option value="${s.Txirrindularia_ID}">${esc(s.Izena)} (${s.score}%)</option>`
-    ).join("");
-    const mergePart = sugs.length ? `
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
-            <input type="radio" name="fz-${nameEsc}" value="merge"
-              onchange="fuzzyChoice(this.closest('[data-csv]').dataset.csv, 'merge', null)">
-            <span>🔀 Fusionatu honekin:</span>
-          </label>
-          <select id="fzsel-${nameEsc}"
-            style="margin-left:22px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none"
-            onchange="fuzzyChoice(this.closest('[data-csv]').dataset.csv, 'merge', this.value)">
-            ${sugOpts}
-          </select>` : `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-left:4px">Proposamenik ez — berri gisa sartuko da</div>`;
-    return `
-    <div data-csv="${nameEsc}" style="padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--bg)">
-      <div style="margin-bottom:8px">
-        <span style="font-size:12px;color:var(--muted)">CSV-n:</span>
-        <span style="font-size:14px;font-weight:700;color:var(--accent2);margin-left:6px">${nameEsc}</span>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:6px">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
-          <input type="radio" name="fz-${nameEsc}" value="new" checked
-            onchange="fuzzyChoice(this.closest('[data-csv]').dataset.csv, 'new', null)">
-          <span>✨ Berri gisa sartu</span>
-        </label>
-        ${mergePart}
+  const matched   = checks.filter(c => c.matched_id !== null);
+  const unmatched = checks.filter(c => c.matched_id === null);
+
+  const allRiderOpts = state.txirrindulariak
+    .map(r => `<option value="${r.Txirrindularia_ID}">${esc(r.Izena)}</option>`)
+    .join('');
+
+  function rowHtml(c, i) {
+    const isMatched = c.matched_id !== null;
+    const sugOpts = c.suggestions.map(s =>
+      `<option value="${s.Txirrindularia_ID}" ${s.Txirrindularia_ID == c.matched_id ? 'selected' : ''}>${esc(s.Izena)} — ${s.score}%</option>`
+    ).join('');
+    const mergeSelOpts = sugOpts
+      ? `<optgroup label="Antzekoenak">${sugOpts}</optgroup><optgroup label="Guztiak">${allRiderOpts}</optgroup>`
+      : allRiderOpts;
+
+    return `<div class="fz-row" id="fzrow-${i}" data-csv="${esc(c.csv_name)}"
+        style="padding:10px 14px;border:1px solid var(--border);border-radius:8px;margin-bottom:7px;background:var(--bg)">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:140px">
+          <div style="font-size:11px;color:var(--muted)">CSV</div>
+          <div style="font-size:13px;font-weight:700;color:var(--accent2)">${esc(c.csv_name)}</div>
+        </div>
+        <div style="font-size:16px;color:var(--muted)">→</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex:2">
+          <button id="fzbtn-new-${i}" class="btn btn-sm ${isMatched?'btn-ghost':'btn-primary'}"
+            style="font-size:12px" onclick="setFzMode(${i},'new')">✨ Berri gisa sartu</button>
+          <button id="fzbtn-merge-${i}" class="btn btn-sm ${isMatched?'btn-primary':'btn-ghost'}"
+            style="font-size:12px;${isMatched?'background:var(--accent)':''}" onclick="setFzMode(${i},'merge')">🔀 Lotu honetara:</button>
+          <select id="fzsel-${i}" style="flex:1;min-width:170px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;${isMatched?'':'opacity:.5'}"
+            onchange="onFzSelChange(${i},this.value)">
+            <option value="">— Hautatu —</option>
+            ${mergeSelOpts}
+          </select>
+        </div>
+        <div style="font-size:11px;color:${isMatched?'#4ade80':'var(--accent2)'};white-space:nowrap">
+          ${isMatched ? `✅ <strong>${esc(c.matched_name)}</strong>` : '⚠️ Ez da aurkitu'}
+        </div>
       </div>
     </div>`;
-  }).join("");
+  }
+
+  const secHtml = (label, color, items, offset) => items.length ? `
+    <div style="margin-bottom:12px">
+      <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:${color};margin-bottom:6px">${label} (${items.length})</div>
+      ${items.map((c,i) => rowHtml(c, offset+i)).join('')}
+    </div>` : '';
 
   wrap.innerHTML = `
     <div class="csv-step-card" style="margin-top:12px">
-      <div class="step-label"><span class="step-num">!</span> Txirrindulari antzekoak aurkitu dira</div>
-      <p style="font-size:13px;color:var(--muted);margin-bottom:14px">
-        Ondorengo txirrindulariak ez dira aurkitu DB-an baina antzeko izenak daude. Bakoitzarentzat erabaki:
-      </p>
-      <div id="fuzzy-rows">${rows}</div>
-      <div style="display:flex;gap:10px;margin-top:14px">
-        <button class="btn btn-primary" id="btn-fuzzy-confirm">⬆ Inportatu erabakiekin</button>
+      <div class="step-label"><span class="step-num">!</span> Txirrindulariak egiaztatu (${checks.length})</div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="setAllFzMode('new')">Denak berri</button>
+        <button class="btn btn-ghost btn-sm" onclick="setAllFzMode('merge')">Denak auto-lotu</button>
+        <span style="color:var(--muted);font-size:12px;align-self:center" id="fz-summary"></span>
+      </div>
+      ${secHtml('✅ Automatikoki detektatuak','#4ade80', matched, 0)}
+      ${secHtml('⚠️ Ez da aurkitu','var(--accent2)', unmatched, matched.length)}
+      <div style="display:flex;gap:10px;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <button class="btn btn-primary" onclick="doCSVImportWithMergeMap()">⬆ Inportatu erabakiekin</button>
         <button class="btn btn-ghost" onclick="el('csv-preview-result').innerHTML=''">Utzi</button>
       </div>
     </div>`;
 
-  // Hasierako egoera: denak "new"
-  checks.forEach(c => { mergeMap[c.csv_name] = null; });
-
-  el("btn-fuzzy-confirm")?.addEventListener("click", () => doCSVImportWithMergeMap(type, ctx));
+  updateFzSummary(checks.length);
 }
 
-function fuzzyChoice(csv_name, mode, sel_val) {
-  if (mode === "new") {
+function setFzMode(i, mode) {
+  const row = document.getElementById(`fzrow-${i}`);
+  const csv_name = row?.dataset.csv;
+  if (!csv_name) return;
+
+  const btnNew   = el(`fzbtn-new-${i}`);
+  const btnMerge = el(`fzbtn-merge-${i}`);
+  const sel      = el(`fzsel-${i}`);
+
+  if (mode === 'new') {
     mergeMap[csv_name] = null;
-    // Ziurtatu radio "new" markatuta dagoela
-    const radio = document.querySelector(`input[name="fz-${esc(csv_name)}"][value="new"]`);
-    if (radio) radio.checked = true;
+    if (btnNew)   { btnNew.className = 'btn btn-sm btn-primary'; btnNew.style.background = ''; }
+    if (btnMerge) { btnMerge.className = 'btn btn-sm btn-ghost'; btnMerge.style.background = ''; }
+    if (sel) sel.style.opacity = '0.4';
   } else {
-    // "merge" modua: select-eko balioa hartu
-    const selEl = el("fzsel-" + esc(csv_name));
-    const val = sel_val || selEl?.value;
-    mergeMap[csv_name] = val ? Number(val) : null;
-    // Radio "merge" markatu
-    const radio = document.querySelector(`input[name="fz-${esc(csv_name)}"][value="merge"]`);
-    if (radio) radio.checked = true;
+    const val = sel?.value ? Number(sel.value) : null;
+    mergeMap[csv_name] = val;
+    if (btnNew)   { btnNew.className = 'btn btn-sm btn-ghost'; btnNew.style.background = ''; }
+    if (btnMerge) { btnMerge.className = 'btn btn-sm btn-primary'; btnMerge.style.background = 'var(--accent)'; }
+    if (sel) sel.style.opacity = '1';
   }
+  updateFzSummary(document.querySelectorAll('.fz-row').length);
 }
 
-async function doCSVImportWithMergeMap(type, ctx) {
+function setAllFzMode(mode) {
+  document.querySelectorAll('.fz-row').forEach((row, i) => {
+    if (mode === 'new') {
+      setFzMode(i, 'new');
+    } else {
+      // Fusionatu auto: select-eko lehen balioa erabili
+      const sel = el(`fzsel-${i}`);
+      if (sel?.value) setFzMode(i, 'merge');
+    }
+  });
+}
+
+function onFzSelChange(i, val) {
+  const row = document.getElementById(`fzrow-${i}`);
+  const csv_name = row?.dataset.csv;
+  if (csv_name) mergeMap[csv_name] = val ? Number(val) : null;
+}
+
+function onFzSearch(i, query, suggestions) {
+  const sel = el(`fzsel-${i}`);
+  if (!sel) return;
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? suggestions.filter(s => s.Izena.toLowerCase().includes(q))
+    : suggestions;
+  sel.innerHTML = filtered.map(s =>
+    `<option value="${s.Txirrindularia_ID}">${esc(s.Izena)} — ${s.score}%</option>`
+  ).join('');
+  // Eguneratu mergeMap lehenengo aukerarekin
+  const row = document.getElementById(`fzrow-${i}`);
+  if (row && sel.value) mergeMap[row.dataset.csv] = Number(sel.value);
+}
+
+function updateFzSummary(total) {
+  const berri    = Object.values(mergeMap).filter(v => v === null).length;
+  const fusionatu = Object.values(mergeMap).filter(v => v !== null).length;
+  const sum = el('fz-summary');
+  if (sum) sum.textContent = `${fusionatu} fusionatu, ${berri} berri (${total} total)`;
+}
+
+async function doCSVImportWithMergeMap() {
+  const type = window._fzType;
+  const ctx  = window._fzCtx || {};
   const payload = {
     profile: type,
     mapping: getMapping(),
@@ -818,17 +890,22 @@ async function doCSVImportWithMergeMap(type, ctx) {
     merge_map: mergeMap,
   };
   try {
-    const r = await api("/api/csv/import", { method: "POST", body: JSON.stringify(payload) });
-    console.log("Import emaitza (merge):", r);
-    if (r.errors.length > 0) {
-      const sample = r.errors.slice(0,3).map(e => e.reason).join(" | ");
-      showToast(`⚠️ ${r.inserted} sartu, ${r.skipped} saltatuta, ${r.errors.length} errore: ${sample}`, "err");
+    const r = await fetch("/api/csv/import", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+    const data = await r.json();
+    console.log("Import emaitza:", data);
+    if (data.errors?.length > 0) {
+      const sample = data.errors.slice(0,3).map(e => e.reason).join(" | ");
+      showToast(`⚠️ ${data.inserted} sartu, ${data.skipped} saltatuta, ${data.errors.length} errore: ${sample}`, "err");
     } else {
-      showToast(`✅ ${r.inserted} sartu, ${r.skipped} saltatuta`);
+      showToast(`✅ ${data.inserted} sartu, ${data.skipped} saltatuta`);
     }
     el("csv-preview-result").innerHTML = "";
     await reloadData();
-    if (r.inserted > 0 && ctx["Txapelketa_ID"]) {
+    if (data.inserted > 0 && ctx["Txapelketa_ID"]) {
       setSection("sailkapenak");
       state.sailTab = "txirrindulariak";
       document.querySelectorAll(".tab[data-sltab]").forEach(t => {
@@ -840,6 +917,10 @@ async function doCSVImportWithMergeMap(type, ctx) {
     }
   } catch(e) { showToast(e.message, "err"); }
 }
+
+function fuzzyChoice() {} // bateragarritasunerako
+
+
 
 // ── Undo / Redo ───────────────────────────────────────────────────────────────
 function renderUndoList(st) {
@@ -858,208 +939,10 @@ function renderUndoList(st) {
   )].join("");
 }
 
-// ── Ezizenak lotu ────────────────────────────────────────────────────────────
-async function loadEzizenak() {
-  try {
-    const data = await api("/api/ezizenak");
-    state.ezizenak = data;
-    renderEzizenak();
-  } catch(e) { showToast(e.message, "err"); }
-}
-
-function renderEzizenak() {
-  const data = state.ezizenak || [];
-  const q      = (el("ezizen-search")?.value || "").toLowerCase();
-  const filter = el("ezizen-filter")?.value || "";
-
-  let filtered = data.filter(r => {
-    if (q && !(r.Ezizena||"").toLowerCase().includes(q) && !(r.Txapelketa||"").toLowerCase().includes(q)) return false;
-    if (filter === "lotu-gabe" && r.Porralaria_ID) return false;
-    if (filter === "lotuta"    && !r.Porralaria_ID) return false;
-    return true;
-  });
-
-  el("ezizen-count").textContent = filtered.length + " ezizen";
-
-  const porrOpts = (state.porralariak || [])
-    .map(p => `<option value="${p.Porralaria_ID}">${esc(p.Izena)}</option>`)
-    .join("");
-
-  el("ezizen-tbody").innerHTML = filtered.map(r => {
-    const lotuBadge = r.Porralaria_ID
-      ? `<span style="color:#4ade80;font-weight:600">${esc(r.Porralaria)}</span>`
-      : `<span style="color:var(--muted);font-size:12px">Lotu gabe</span>`;
-    return `<tr>
-      <td style="font-weight:600">${esc(r.Ezizena)}</td>
-      <td style="color:var(--muted);font-size:12px">${esc(r.Txapelketa||"")}</td>
-      <td>${lotuBadge}</td>
-      <td>
-        <div style="display:flex;gap:6px;align-items:center">
-          <select id="porra-sel-${r.Ezizen_ID}" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none">
-            <option value="">— Hautatu —</option>
-            ${porrOpts}
-          </select>
-          <button class="btn btn-sm btn-primary" onclick="lotuegin(${r.Ezizen_ID})">Lotu</button>
-        </div>
-      </td>
-    </tr>`;
-  }).join("") || `<tr><td colspan="4" style="color:var(--muted);padding:24px;text-align:center">Ez dago emaitzarik</td></tr>`;
-
-  // Jarri aukeratuta jada lotutakoa
-  filtered.forEach(r => {
-    if (r.Porralaria_ID) {
-      const sel = el("porra-sel-" + r.Ezizen_ID);
-      if (sel) sel.value = r.Porralaria_ID;
-    }
-  });
-}
-
-async function lotuegin(ezizen_id) {
-  const sel = el("porra-sel-" + ezizen_id);
-  const porralaria_id = sel?.value;
-  if (!porralaria_id) return showToast("Porralaria bat hautatu", "err");
-  try {
-    await api("/api/ezizen-lotu", {
-      method: "POST",
-      body: JSON.stringify({ ezizen_id: Number(ezizen_id), porralaria_id: Number(porralaria_id) }),
-    });
-    showToast("✅ Ezizena lotuta");
-    await loadEzizenak();
-  } catch(e) { showToast(e.message, "err"); }
-}
-
-// ── Merge ─────────────────────────────────────────────────────────────────────
-function renderMergeSection() {
-  const kind   = el("merge-kind")?.value || "txirrindulariak";
-  const search = (el("merge-search")?.value || "").trim().toLowerCase();
-  const list   = kind === "txirrindulariak" ? state.txirrindulariak : state.porralariak;
-  const idKey  = kind === "txirrindulariak" ? "Txirrindularia_ID" : "Porralaria_ID";
-
-  // Gorde aukeratutako balioak AURRETIK
-  const keepSel = el("merge-keep-sel");
-  const dropSel = el("merge-drop-sel");
-  const prevKeep = keepSel?.value || "";
-  const prevDrop = dropSel?.value || "";
-
-  // Filtratu baina hautatutako elementuak beti sartu zerrendan
-  const filtered = search ? list.filter(r => (r.Izena||"").toLowerCase().includes(search)) : list;
-
-  // Hautatutakoak baina filtratuan ez daudenak gehitu
-  const filteredIds = new Set(filtered.map(r => String(r[idKey])));
-  const extras = [];
-  if (prevKeep && !filteredIds.has(prevKeep)) {
-    const found = list.find(r => String(r[idKey]) === prevKeep);
-    if (found) extras.push(found);
-  }
-  if (prevDrop && !filteredIds.has(prevDrop)) {
-    const found = list.find(r => String(r[idKey]) === prevDrop);
-    if (found) extras.push(found);
-  }
-
-  const finalList = [...filtered, ...extras];
-
-  const makeOpts = sel => `<option value="">— Hautatu —</option>` +
-    finalList.map(r => `<option value="${r[idKey]}" ${sel===String(r[idKey])?"selected":""}>${esc(r.Izena)} (ID: ${r[idKey]})</option>`).join("");
-
-  if (keepSel) keepSel.innerHTML = makeOpts(prevKeep);
-  if (dropSel) dropSel.innerHTML = makeOpts(prevDrop);
-}
-
-
-async function runMergePreview() {
-  const kind    = el("merge-kind")?.value || "txirrindulariak";
-  const keep_id = el("merge-keep-sel")?.value;
-  const drop_id = el("merge-drop-sel")?.value;
-  if (!keep_id || !drop_id)   return showToast("Bi elementuak aukeratu", "err");
-  if (keep_id === drop_id)    return showToast("Elementu desberdinak aukeratu", "err");
-
-  const btn = el("btn-merge-preview");
-  if (btn) { btn.disabled = true; btn.textContent = "Bilatzen..."; }
-  try {
-    const r = await api("/api/merge/preview", {
-      method: "POST", body: JSON.stringify({ kind, keep_id: Number(keep_id), drop_id: Number(drop_id) }),
-    });
-    renderMergePreview(r, kind);
-  } catch(e) { showToast(e.message, "err"); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = "🔍 Aurreikusi fusio"; } }
-}
-
-function renderMergePreview(r, kind) {
-  const wrap = el("merge-preview-wrap");
-  if (!wrap) return;
-  if (!r.ok) { wrap.innerHTML = `<div style="color:var(--accent);padding:12px">${esc(r.reason)}</div>`; return; }
-
-  const refsHtml = r.refs?.length
-    ? r.refs.map(ref =>
-        `<div class="undo-item" style="margin-bottom:6px">
-          <span class="undo-label">📋 <strong>${esc(ref.table)}</strong></span>
-          <span class="badge">${ref.count} erreferentzia</span>
-        </div>`).join("")
-    : `<p style="color:var(--muted);font-size:13px">Ez dago erreferentziarik migratzeko</p>`;
-
-  const porraLine = r.zenbat_porra_merged !== undefined
-    ? `<p style="margin-top:8px;font-size:13px;color:var(--muted)">🏅 <strong>"Zenbat Porra"</strong> balioa: <strong>${r.zenbat_porra_merged}</strong> izango da</p>`
-    : "";
-
-  wrap.innerHTML = `
-    <div class="csv-step-card" style="margin-top:14px">
-      <div class="step-label"><span class="step-num">✓</span> Fusioaren aurreikuspen</div>
-      <div class="merge-box">
-        <div>
-          <div class="merge-side-label">✅ KEEP — Bizirik</div>
-          <div class="merge-name keep">${esc(r.keep.izena)}</div>
-          <div style="font-size:12px;color:var(--muted)">ID: ${r.keep.id}</div>
-        </div>
-        <div style="font-size:24px;color:var(--muted)">←</div>
-        <div>
-          <div class="merge-side-label">❌ DROP — Ezabatu</div>
-          <div class="merge-name drop">${esc(r.dropped.izena)}</div>
-          <div style="font-size:12px;color:var(--muted)">ID: ${r.dropped.id}</div>
-        </div>
-      </div>
-      <div style="margin-bottom:12px">
-        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px;text-transform:uppercase">Taulen aldaketak</div>
-        ${refsHtml}
-      </div>
-      ${porraLine}
-      <div style="margin-top:12px;padding:10px 12px;background:rgba(230,57,70,.08);border:1px solid rgba(230,57,70,.3);border-radius:7px;font-size:12px;color:var(--accent)">
-        ⚠️ Eragiketa <strong>itzulezina</strong> da. "${esc(r.dropped.izena)}" behin betiko ezabatuko da.
-      </div>
-      <div style="margin-top:12px;display:flex;gap:10px">
-        <button class="btn btn-primary" id="btn-merge-execute" style="background:var(--accent)">🔀 Fusionatu orain</button>
-        <button class="btn btn-ghost" id="btn-merge-cancel">Utzi</button>
-      </div>
-    </div>`;
-
-  el("btn-merge-execute")?.addEventListener("click", () =>
-    doMergeExecute(kind, r.keep.id, r.dropped.id, r.keep.izena, r.dropped.izena));
-  el("btn-merge-cancel")?.addEventListener("click", () => { wrap.innerHTML = ""; });
-}
-
-async function doMergeExecute(kind, keep_id, drop_id, keep_name, drop_name) {
-  const btn = el("btn-merge-execute");
-  if (btn) { btn.disabled = true; btn.textContent = "Fusionatzen..."; }
-  try {
-    const r = await api("/api/merge/execute", {
-      method: "POST", body: JSON.stringify({ kind, keep_id, drop_id }),
-    });
-    if (!r.ok) { showToast(r.reason || "Errore ezezaguna", "err"); return; }
-    const migTotal  = (r.log||[]).reduce((s,x) => s + x.migrated, 0);
-    const skipTotal = (r.log||[]).reduce((s,x) => s + x.skipped, 0);
-    showToast(`✅ Fusio eginda: "${keep_name}" ← "${drop_name}" | ${migTotal} migratuta, ${skipTotal} saltatuta`);
-    el("merge-preview-wrap").innerHTML = "";
-    el("merge-keep-sel").value = "";
-    el("merge-drop-sel").value = "";
-    await reloadData();
-  } catch(e) {
-    showToast(e.message, "err");
-    if (btn) { btn.disabled = false; btn.textContent = "🔀 Fusionatu orain"; }
-  }
-}
-
-// ── Events ────────────────────────────────────────────────────────────────────
+// ── CSV file handling ─────────────────────────────────────────────────────────
 function bindDrop() {
   const dz = el("drop-zone");
+  if (!dz) return;
   dz.addEventListener("click", () => el("csv-file-input").click());
   dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("drag-over"); });
   dz.addEventListener("dragleave", () => dz.classList.remove("drag-over"));
@@ -1074,20 +957,174 @@ function handleFile(file) {
     const { headers, rows } = parseCSV(e.target.result);
     csvHeaders = headers; csvRows = rows;
     const dz = el("drop-zone");
-    dz.querySelector(".dz-title").textContent = file.name;
-    dz.querySelector(".dz-sub").textContent = rows.length + " lerro";
+    if (dz) {
+      dz.querySelector(".dz-title").textContent = file.name;
+      dz.querySelector(".dz-sub").textContent = rows.length + " lerro";
+    }
     renderCSVSteps();
   };
   reader.readAsText(file);
 }
 
-function bindMergeEvents() {
-  el("merge-kind")?.addEventListener("change", () => {
-    renderMergeSection();
-    el("merge-preview-wrap").innerHTML = "";
+// ── Ezizenak lotu ────────────────────────────────────────────────────────────
+async function loadEzizenak() {
+  try {
+    const data = await api("/api/ezizenak");
+    state.ezizenak = data;
+    renderEzizenak();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+function renderEzizenak() {
+  const data = state.ezizenak || [];
+  const q      = (el("ezizen-search")?.value || "").toLowerCase();
+  const filter = el("ezizen-filter")?.value || "";
+  let filtered = data.filter(r => {
+    if (q && !(r.Ezizena||"").toLowerCase().includes(q) && !(r.Txapelketa||"").toLowerCase().includes(q)) return false;
+    if (filter === "lotu-gabe" && r.Porralaria_ID) return false;
+    if (filter === "lotuta"    && !r.Porralaria_ID) return false;
+    return true;
   });
+  el("ezizen-count").textContent = filtered.length + " ezizen";
+  const porrOpts = (state.porralariak || [])
+    .map(p => `<option value="${p.Porralaria_ID}">${esc(p.Izena)}</option>`).join("");
+  el("ezizen-tbody").innerHTML = filtered.map(r => {
+    const lotuBadge = r.Porralaria_ID
+      ? `<span style="color:#4ade80;font-weight:600">${esc(r.Porralaria)}</span>`
+      : `<span style="color:var(--muted);font-size:12px">Lotu gabe</span>`;
+    return `<tr>
+      <td style="font-weight:600">${esc(r.Ezizena)}</td>
+      <td style="color:var(--muted);font-size:12px">${esc(r.Txapelketa||"")}</td>
+      <td>${lotuBadge}</td>
+      <td><div style="display:flex;gap:6px;align-items:center">
+        <select id="porra-sel-${r.Ezizen_ID}" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none">
+          <option value="">— Hautatu —</option>${porrOpts}
+        </select>
+        <button class="btn btn-sm btn-primary" onclick="lotuegin(${r.Ezizen_ID})">Lotu</button>
+      </div></td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="4" style="color:var(--muted);padding:24px;text-align:center">Ez dago emaitzarik</td></tr>`;
+  filtered.forEach(r => {
+    if (r.Porralaria_ID) { const s = el("porra-sel-"+r.Ezizen_ID); if(s) s.value=r.Porralaria_ID; }
+  });
+}
+
+async function lotuegin(ezizen_id) {
+  const sel = el("porra-sel-" + ezizen_id);
+  const porralaria_id = sel?.value;
+  if (!porralaria_id) return showToast("Porralaria bat hautatu", "err");
+  try {
+    await api("/api/ezizen-lotu", { method:"POST", body: JSON.stringify({ ezizen_id: Number(ezizen_id), porralaria_id: Number(porralaria_id) }) });
+    showToast("✅ Ezizena lotuta");
+    await loadEzizenak();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+// ── Merge ─────────────────────────────────────────────────────────────────────
+function renderMergeSection() {
+  const kind   = el("merge-kind")?.value || "txirrindulariak";
+  const search = (el("merge-search")?.value || "").trim().toLowerCase();
+  const list   = kind === "txirrindulariak" ? state.txirrindulariak : state.porralariak;
+  const idKey  = kind === "txirrindulariak" ? "Txirrindularia_ID" : "Porralaria_ID";
+  const keepSel = el("merge-keep-sel");
+  const dropSel = el("merge-drop-sel");
+  const prevKeep = keepSel?.value || "";
+  const prevDrop = dropSel?.value || "";
+  const filtered = search ? list.filter(r => (r.Izena||"").toLowerCase().includes(search)) : list;
+  const filteredIds = new Set(filtered.map(r => String(r[idKey])));
+  const extras = [];
+  if (prevKeep && !filteredIds.has(prevKeep)) { const f = list.find(r => String(r[idKey])===prevKeep); if(f) extras.push(f); }
+  if (prevDrop && !filteredIds.has(prevDrop)) { const f = list.find(r => String(r[idKey])===prevDrop); if(f) extras.push(f); }
+  const finalList = [...filtered, ...extras];
+  const makeOpts = sel => `<option value="">— Hautatu —</option>` +
+    finalList.map(r => `<option value="${r[idKey]}" ${sel===String(r[idKey])?"selected":""}>${esc(r.Izena)} (ID: ${r[idKey]})</option>`).join("");
+  if (keepSel) keepSel.innerHTML = makeOpts(prevKeep);
+  if (dropSel) dropSel.innerHTML = makeOpts(prevDrop);
+}
+
+async function runMergePreview() {
+  const kind    = el("merge-kind")?.value || "txirrindulariak";
+  const keep_id = el("merge-keep-sel")?.value;
+  const drop_id = el("merge-drop-sel")?.value;
+  if (!keep_id || !drop_id)   return showToast("Bi elementuak aukeratu", "err");
+  if (keep_id === drop_id)    return showToast("Elementu desberdinak aukeratu", "err");
+  const btn = el("btn-merge-preview");
+  if (btn) { btn.disabled=true; btn.textContent="Bilatzen..."; }
+  try {
+    const r = await api("/api/merge/preview", { method:"POST", body: JSON.stringify({ kind, keep_id: Number(keep_id), drop_id: Number(drop_id) }) });
+    renderMergePreview(r, kind);
+  } catch(e) { showToast(e.message,"err"); }
+  finally { if(btn){ btn.disabled=false; btn.textContent="🔍 Aurreikusi fusio"; } }
+}
+
+function renderMergePreview(r, kind) {
+  const wrap = el("merge-preview-wrap");
+  if (!wrap) return;
+  if (!r.ok) { wrap.innerHTML=`<div style="color:var(--accent);padding:12px">${esc(r.reason)}</div>`; return; }
+  const refsHtml = r.refs?.length
+    ? r.refs.map(ref=>`<div class="undo-item" style="margin-bottom:6px"><span class="undo-label">📋 <strong>${esc(ref.table)}</strong></span><span class="badge">${ref.count} erreferentzia</span></div>`).join("")
+    : `<p style="color:var(--muted);font-size:13px">Ez dago erreferentziarik migratzeko</p>`;
+  const porraLine = r.zenbat_porra_merged!==undefined
+    ? `<p style="margin-top:8px;font-size:13px;color:var(--muted)">🏅 <strong>"Zenbat Porra"</strong>: <strong>${r.zenbat_porra_merged}</strong></p>` : "";
+  wrap.innerHTML=`
+    <div class="csv-step-card" style="margin-top:14px">
+      <div class="step-label"><span class="step-num">✓</span> Fusioaren aurreikuspen</div>
+      <div class="merge-box">
+        <div><div class="merge-side-label">✅ KEEP</div><div class="merge-name keep">${esc(r.keep.izena)}</div><div style="font-size:12px;color:var(--muted)">ID: ${r.keep.id}</div></div>
+        <div style="font-size:24px;color:var(--muted)">←</div>
+        <div><div class="merge-side-label">❌ DROP</div><div class="merge-name drop">${esc(r.dropped.izena)}</div><div style="font-size:12px;color:var(--muted)">ID: ${r.dropped.id}</div></div>
+      </div>
+      <div style="margin-bottom:12px">${refsHtml}</div>
+      ${porraLine}
+      <div style="margin-top:12px;padding:10px 12px;background:rgba(230,57,70,.08);border:1px solid rgba(230,57,70,.3);border-radius:7px;font-size:12px;color:var(--accent)">
+        ⚠️ Eragiketa <strong>itzulezina</strong> da.
+      </div>
+      <div style="margin-top:12px;display:flex;gap:10px">
+        <button class="btn btn-primary" id="btn-merge-execute" style="background:var(--accent)">🔀 Fusionatu orain</button>
+        <button class="btn btn-ghost" id="btn-merge-cancel">Utzi</button>
+      </div>
+    </div>`;
+  el("btn-merge-execute")?.addEventListener("click", ()=>doMergeExecute(kind,r.keep.id,r.dropped.id,r.keep.izena,r.dropped.izena));
+  el("btn-merge-cancel")?.addEventListener("click", ()=>{ wrap.innerHTML=""; });
+}
+
+async function doMergeExecute(kind, keep_id, drop_id, keep_name, drop_name) {
+  const btn = el("btn-merge-execute");
+  if (btn) { btn.disabled=true; btn.textContent="Fusionatzen..."; }
+  try {
+    const r = await api("/api/merge/execute", { method:"POST", body: JSON.stringify({kind,keep_id,drop_id}) });
+    if (!r.ok) { showToast(r.reason||"Errore ezezaguna","err"); return; }
+    const migTotal  = (r.log||[]).reduce((s,x)=>s+x.migrated,0);
+    const skipTotal = (r.log||[]).reduce((s,x)=>s+x.skipped,0);
+    showToast(`✅ Fusio eginda: "${keep_name}" ← "${drop_name}" | ${migTotal} migratuta, ${skipTotal} saltatuta`);
+    el("merge-preview-wrap").innerHTML="";
+    el("merge-keep-sel").value="";
+    el("merge-drop-sel").value="";
+    await reloadData();
+  } catch(e) {
+    showToast(e.message,"err");
+    if(btn){ btn.disabled=false; btn.textContent="🔀 Fusionatu orain"; }
+  }
+}
+
+function bindMergeEvents() {
+  el("merge-kind")?.addEventListener("change", ()=>{ renderMergeSection(); el("merge-preview-wrap").innerHTML=""; });
   el("merge-search")?.addEventListener("input", renderMergeSection);
   el("btn-merge-preview")?.addEventListener("click", runMergePreview);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function normalizeIzenak() {
+  if (!confirm('Txirrindulari eta porralari izen guztiei Title Case formatua emango zaie (adib: "POGACAR TADEJ" → "Pogacar Tadej"). Jarraitu?')) return;
+  try {
+    const r = await api("/api/normalize-izenak", { method: "POST" });
+    if (r.ok) {
+      const t = r.changed.txirrindulariak;
+      const p = r.changed.porralariak;
+      showToast(`✅ ${t} txirrindulari eta ${p} porralari aldatu`);
+      await reloadData();
+    }
+  } catch(e) { showToast(e.message, "err"); }
 }
 
 async function init() {
@@ -1097,47 +1134,33 @@ async function init() {
   el("sail-txap-sel")?.addEventListener("change", renderSailkapena);
   el("sail-search")?.addEventListener("input", renderSailkapena);
   el("generic-table-search")?.addEventListener("input", renderGenericTable);
-  el("dash-txap-sel")?.addEventListener("change", e => renderDashRanking(e.target.value));
+  el("dash-txap-sel")?.addEventListener("change", e=>renderDashRanking(e.target.value));
   el("csv-type")?.addEventListener("change", renderCSVSteps);
   el("ezizen-search")?.addEventListener("input", renderEzizenak);
   el("ezizen-filter")?.addEventListener("change", renderEzizenak);
-
   document.querySelectorAll(".tab[data-sltab]").forEach(t => {
-    t.addEventListener("click", () => {
-      document.querySelectorAll(".tab[data-sltab]").forEach(x => x.classList.remove("active"));
-      t.classList.add("active"); state.sailTab = t.dataset.sltab; renderSailkapena();
+    t.addEventListener("click", ()=>{
+      document.querySelectorAll(".tab[data-sltab]").forEach(x=>x.classList.remove("active"));
+      t.classList.add("active"); state.sailTab=t.dataset.sltab; renderSailkapena();
     });
   });
-
-  el("m-txap-btn")?.addEventListener("click", () => manualAdd({
-    table:"Txapelketak", data:{Izena: el("m-txap-izena").value, Urtea: Number(el("m-txap-urtea").value)}
-  }));
-  el("m-porra-btn")?.addEventListener("click", () => manualAdd({
-    table:"Porralariak", data:{Izena: el("m-porra-izena").value}
-  }));
-  el("m-txirri-btn")?.addEventListener("click", () => manualAdd({
-    table:"Txirrindulariak", data:{Izena: el("m-txirri-izena").value}
-  }));
-  el("m-karrera-btn")?.addEventListener("click", () => manualAdd({
-    table:"Karrerak", data:{
-      Txapelketa_ID: Number(el("m-karrera-txap").value),
-      Izena: el("m-karrera-izena").value, Urtea: Number(el("m-karrera-urtea").value)
-    }
-  }));
-
-  el("btn-undo")?.addEventListener("click", async () => {
-    try { const r = await api("/api/undo",{method:"POST"}); showToast(r.ok ? `↩ Desegin: ${r.label}` : r.reason, r.ok?"ok":"err"); await reloadData(); } catch(e){showToast(e.message,"err");}
+  el("m-txap-btn")?.addEventListener("click", ()=>manualAdd({table:"Txapelketak",data:{Izena:el("m-txap-izena").value,Urtea:Number(el("m-txap-urtea").value)}}));
+  el("m-porra-btn")?.addEventListener("click", ()=>manualAdd({table:"Porralariak",data:{Izena:el("m-porra-izena").value}}));
+  el("m-txirri-btn")?.addEventListener("click", ()=>manualAdd({table:"Txirrindulariak",data:{Izena:el("m-txirri-izena").value}}));
+  el("m-karrera-btn")?.addEventListener("click", ()=>manualAdd({table:"Karrerak",data:{Txapelketa_ID:Number(el("m-karrera-txap").value),Izena:el("m-karrera-izena").value,Urtea:Number(el("m-karrera-urtea").value)}}));
+  el("btn-undo")?.addEventListener("click", async()=>{
+    try{ const r=await api("/api/undo",{method:"POST"}); showToast(r.ok?`↩ Desegin: ${r.label}`:r.reason,r.ok?"ok":"err"); await reloadData(); }catch(e){showToast(e.message,"err");}
   });
-  el("btn-redo")?.addEventListener("click", async () => {
-    try { const r = await api("/api/redo",{method:"POST"}); showToast(r.ok ? `↪ Berregin: ${r.label}` : r.reason, r.ok?"ok":"err"); await reloadData(); } catch(e){showToast(e.message,"err");}
+  el("btn-redo")?.addEventListener("click", async()=>{
+    try{ const r=await api("/api/redo",{method:"POST"}); showToast(r.ok?`↪ Berregin: ${r.label}`:r.reason,r.ok?"ok":"err"); await reloadData(); }catch(e){showToast(e.message,"err");}
   });
-
   bindMergeEvents();
   await buildTableNav();
   await reloadData();
 }
 
 init();
+
 </script>
 </body>
 </html>
