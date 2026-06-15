@@ -47,18 +47,20 @@ CREATE TABLE IF NOT EXISTS "KarreraSailkapena" (
     FOREIGN KEY("Txirrindularia_ID") REFERENCES "Txirrindulariak"("Txirrindularia_ID")
 );
 
-CREATE TABLE IF NOT EXISTS "TxapelketaSailkapenaPorralariak" (
-    "Txapelketa_ID" INTEGER NOT NULL,
-    "Ezizen_ID" INTEGER NOT NULL,
-    "Azken_Karrera_ID" INTEGER NOT NULL,
-    "Puntuak_Totalean" INTEGER NOT NULL,
-    "Puntuak_Azken_Karrera" INTEGER NOT NULL,
-   	"Puntuazio_Finala"	INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY("Txapelketa_ID", "Ezizen_ID", "Azken_Karrera_ID"),
-    FOREIGN KEY("Azken_Karrera_ID") REFERENCES "Karrerak"("Karrerak_ID"),
-    FOREIGN KEY("Ezizen_ID") REFERENCES "PorralariEzizenak"("Ezizen_ID"),
-    FOREIGN KEY("Txapelketa_ID") REFERENCES "Txapelketak"("Txapelketa_ID")
-);
+CREATE TABLE "TxapelketaSailkapenaPorralariak" (
+	"Txapelketa_ID"	INTEGER NOT NULL,
+	"Ezizen_ID"	INTEGER NOT NULL,
+	"Azken_Karrera_ID"	INTEGER NOT NULL,
+	"Puntuak_Totalean"	INTEGER NOT NULL,
+	"Puntuak_Azken_Karrera"	INTEGER NOT NULL,
+	"Puntuazio_Finala"	INTEGER NOT NULL DEFAULT 0,
+	"Puntuazioa_Fin_Mendikoa"	INTEGER,
+	"Puntuazioa_Fin_Generala"	INTEGER,
+	PRIMARY KEY("Txapelketa_ID","Ezizen_ID","Azken_Karrera_ID"),
+	FOREIGN KEY("Azken_Karrera_ID") REFERENCES "Karrerak"("Karrerak_ID"),
+	FOREIGN KEY("Ezizen_ID") REFERENCES "PorralariEzizenak"("Ezizen_ID"),
+	FOREIGN KEY("Txapelketa_ID") REFERENCES "Txapelketak"("Txapelketa_ID")
+)
 
 CREATE TABLE IF NOT EXISTS "TxapelketaSailkapenaTxirrindulariak" (
     "Txapelketa_ID" INTEGER NOT NULL,
@@ -75,15 +77,17 @@ CREATE TABLE IF NOT EXISTS "TxapelketaSailkapenaTxirrindulariak" (
     FOREIGN KEY("Txirrindularia_ID") REFERENCES "Txirrindulariak"("Txirrindularia_ID")
 );
 
-CREATE TABLE IF NOT EXISTS "TxapelketaEmaitzaPorralariak" (
-    "Txapelketa_ID"   INTEGER NOT NULL,
-    "Ezizen_ID"       INTEGER NOT NULL,
-    "Posizioa"        INTEGER NOT NULL,
-    "Puntuak"         INTEGER NOT NULL,
-    PRIMARY KEY("Txapelketa_ID", "Ezizen_ID"),
-    FOREIGN KEY("Txapelketa_ID") REFERENCES "Txapelketak"("Txapelketa_ID"),
-    FOREIGN KEY("Ezizen_ID") REFERENCES "PorralariEzizenak"("Ezizen_ID")
-);
+CREATE TABLE "TxapelketaEmaitzaPorralariak" (
+	"Txapelketa_ID"	INTEGER NOT NULL,
+	"Ezizen_ID"	INTEGER NOT NULL,
+	"Posizioa"	INTEGER NOT NULL,
+	"Puntuak"	INTEGER NOT NULL,
+	"Puntuak_Mendikoa"	INTEGER,
+	"Puntuak_Generala"	INTEGER,
+	PRIMARY KEY("Txapelketa_ID","Ezizen_ID"),
+	FOREIGN KEY("Ezizen_ID") REFERENCES "PorralariEzizenak"("Ezizen_ID"),
+	FOREIGN KEY("Txapelketa_ID") REFERENCES "Txapelketak"("Txapelketa_ID")
+)
 
 CREATE TABLE IF NOT EXISTS "TxapelketaEmaitzaTxirrindulariak" (
     "Txapelketa_ID"          INTEGER NOT NULL,

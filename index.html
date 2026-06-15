@@ -129,8 +129,10 @@
     <div class="nav-sub-list" id="table-nav-list"></div>
     <div class="nav-section">Sartu</div>
     <div class="nav-item" data-section="add-manual"><span class="icon">✏️</span> Eskuz sartu</div>
+    <div class="nav-item" data-section="izen-orden"><span class="icon">🔃</span> Izen ordena</div>
     <div class="nav-item" data-section="add-csv"><span class="icon">📂</span> CSV inportatu</div>
     <div class="nav-item" data-section="merge"><span class="icon">🔀</span> Fusionatu</div>
+    <div class="nav-item" data-section="izen-ordena"><span class="icon">🔁</span> Izen ordena</div>
     <div class="nav-item" data-section="ezizenak"><span class="icon">🏷️</span> Ezizenak lotu</div>
   </nav>
   <main class="main">
@@ -236,6 +238,40 @@ Tour De France,2026</pre></div>
       </div>
     </section>
 
+    <!-- IZEN ORDENA -->
+    <section class="section" id="sec-izen-orden">
+      <div class="page-header">
+        <div><div class="page-title">🔃 Izen ordena</div><div class="page-sub">Txirrindularien izenak "Izena Abizena" formatuan jarri</div></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost" onclick="izenOrdenKargatu()">🔄 Kargatu</button>
+          <button class="btn btn-primary" id="btn-izen-orden-gorde" onclick="izenOrdenGorde()" style="display:none">💾 Aldaketak gorde</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="toolbar">
+          <input class="search-input" id="izen-orden-search" placeholder="Bilatu txirrindularia..." oninput="izenOrdenRender()"/>
+          <select class="filter-sel" id="izen-orden-filter" onchange="izenOrdenRender()">
+            <option value="">Guztiak</option>
+            <option value="aldatu">Aldaketa dutenak</option>
+            <option value="ondo">Jada ondo daudenak</option>
+          </select>
+          <span style="color:var(--muted);font-size:12px" id="izen-orden-count"></span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th>ID</th>
+              <th>Oraingo izena</th>
+              <th style="width:40px;text-align:center">→</th>
+              <th>Izen berria <span style="font-weight:400;color:var(--muted)">(editagarria)</span></th>
+              <th style="width:80px;text-align:center">Egoera</th>
+            </tr></thead>
+            <tbody id="izen-orden-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <!-- EZIZENAK LOTU -->
     <section class="section" id="sec-ezizenak">
       <div class="page-header"><div><div class="page-title">🏷️ Ezizenak lotu</div><div class="page-sub">Ezizen bakoitza porralari bati esleitu</div></div></div>
@@ -253,6 +289,56 @@ Tour De France,2026</pre></div>
           <thead><tr><th>Ezizena</th><th>Txapelketa</th><th>Porralaria</th><th style="width:200px">Esleitu</th></tr></thead>
           <tbody id="ezizen-tbody"></tbody>
         </table></div>
+      </div>
+    </section>
+
+    <!-- IZEN ORDENA -->
+    <section class="section" id="sec-izen-ordena">
+      <div class="page-header">
+        <div>
+          <div class="page-title">🔁 Izen ordena</div>
+          <div class="page-sub">Txirrindulariak "Izena Abizena" formatura estandarizatu</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost" onclick="loadIzenOrdena()">🔄 Freskatu</button>
+          <button class="btn btn-primary" id="btn-swap-all" onclick="swapHautatuak()" style="display:none">
+            ✅ Hautatuak aldatu
+          </button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-body" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="filterIzenOrdena('all')">Guztiak</button>
+            <button class="btn btn-ghost btn-sm" onclick="filterIzenOrdena('abizena_izena')">⚠️ Abizena-Izena</button>
+            <button class="btn btn-ghost btn-sm" onclick="filterIzenOrdena('izena_abizena')">✅ Izena-Abizena</button>
+            <button class="btn btn-ghost btn-sm" onclick="filterIzenOrdena('unknown')">❓ Ezezagun</button>
+          </div>
+          <input class="search-input" id="izen-ordena-search" placeholder="Bilatu..." oninput="renderIzenOrdena()"
+            style="flex:1;min-width:160px"/>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="izen-ordena-autosel" onchange="autoSelectAbizenaIzena(this.checked)"/>
+            Auto-hautatu "Abizena-Izena" guztiak
+          </label>
+          <span style="color:var(--muted);font-size:12px" id="izen-ordena-count"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:32px"><input type="checkbox" id="izen-ordena-checkall" onchange="checkAllIzenOrdena(this.checked)"/></th>
+                <th>Oraingo izena</th>
+                <th>Proposamena (Izena Abizena)</th>
+                <th>Egoera</th>
+              </tr>
+            </thead>
+            <tbody id="izen-ordena-tbody"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -320,6 +406,7 @@ function setSection(id) {
   document.querySelector(`.nav-item[data-section="${id}"]`)?.classList.add("active");
   if (id === "merge") renderMergeSection();
   if (id === "ezizenak") loadEzizenak();
+  if (id === "izen-orden") izenOrdenKargatu();
 }
 
 document.querySelectorAll(".nav-item[data-section]").forEach(item => {
@@ -614,14 +701,17 @@ function renderCSVSteps() {
   // Build mapping grid
   const FIELD_LABELS = {
     porralariak: ["Izena"], txirrindulariak: ["Izena"], txapelketak: ["Izena","Urtea"],
-    karrerak: ["Izena","Urtea"], txirrindulari_emaitzak: ["Posizioa","Txirrindularia","Puntuak","Dortsala"],
+    karrerak: ["Izena","Urtea"], txirrindulari_emaitzak: ["Posizioa","Txirrindularia","Puntuak","Dortsala","Puntuak_Sailkapen_Nag","Puntuak_Mendian"],
     porralari_emaitzak: ["Posizioa","Ezizena","Puntuak"], karrera_txirrindulari_emaitzak: ["Txirrindularia","Puntuak","Dortsala"],
   };
   const logicals = FIELD_LABELS[type] || csvHeaders;
   const grid = el("mapping-grid");
   if (grid) grid.innerHTML = logicals.map(lf => {
     const autoMatch = csvHeaders.find(h => h.toLowerCase() === lf.toLowerCase()) || "";
-    return `<div class="map-row"><div class="map-field">${esc(lf)}</div><div class="map-arrow">→</div>
+    const isOptional = ["Dortsala","Puntuak_Sailkapen_Nag","Puntuak_Mendian"].includes(lf);
+    const labelMap = {"Puntuak_Sailkapen_Nag": "Puntuak Sailkapen Nag. (opt.)", "Puntuak_Mendian": "Puntuak Mendian (opt.)", "Dortsala": "Dortsala (opt.)"};
+    const displayLabel = labelMap[lf] || lf;
+    return `<div class="map-row"><div class="map-field" style="color:${isOptional?'var(--muted)':'var(--text)'}">${esc(displayLabel)}</div><div class="map-arrow">→</div>
       <select id="map-${esc(lf)}" style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 10px;color:var(--text);font-size:13px;outline:none">
         <option value="">— —</option>
         ${csvHeaders.map(h => `<option value="${esc(h)}" ${h===autoMatch?"selected":""}>${esc(h)}</option>`).join("")}
@@ -633,7 +723,7 @@ function getMapping() {
   const type = el("csv-type")?.value || "";
   const FIELD_LABELS = {
     porralariak: ["Izena"], txirrindulariak: ["Izena"], txapelketak: ["Izena","Urtea"],
-    karrerak: ["Izena","Urtea"], txirrindulari_emaitzak: ["Posizioa","Txirrindularia","Puntuak","Dortsala"],
+    karrerak: ["Izena","Urtea"], txirrindulari_emaitzak: ["Posizioa","Txirrindularia","Puntuak","Dortsala","Puntuak_Sailkapen_Nag","Puntuak_Mendian"],
     porralari_emaitzak: ["Posizioa","Ezizena","Puntuak"], karrera_txirrindulari_emaitzak: ["Txirrindularia","Puntuak","Dortsala"],
   };
   const logicals = FIELD_LABELS[type] || [];
@@ -1114,6 +1204,112 @@ function bindMergeEvents() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+// ── Izen ordena tresna ────────────────────────────────────────────────────────
+let izenOrdenData = [];   // {Txirrindularia_ID, Izena, Proposamena, Aldatu}
+let izenOrdenEdits = {};  // {Txirrindularia_ID: "Izen berria"}
+
+async function izenOrdenKargatu() {
+  try {
+    const data = await api("/api/izen-ordenak/get", { method: "POST" });
+    izenOrdenData = data;
+    izenOrdenEdits = {};
+    // Hasierako aldaketak: proposamena desberdina bada, aurrez bete
+    data.forEach(r => {
+      if (r.Aldatu) izenOrdenEdits[r.Txirrindularia_ID] = r.Proposamena;
+    });
+    izenOrdenRender();
+    const btn = el("btn-izen-orden-gorde");
+    if (btn) btn.style.display = Object.keys(izenOrdenEdits).length ? "inline-flex" : "none";
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+function izenOrdenRender() {
+  const q      = (el("izen-orden-search")?.value || "").toLowerCase();
+  const filter = el("izen-orden-filter")?.value || "";
+
+  let filtered = izenOrdenData.filter(r => {
+    const hasEdit = izenOrdenEdits[r.Txirrindularia_ID] !== undefined;
+    const editVal = izenOrdenEdits[r.Txirrindularia_ID] || r.Izena;
+    if (q && !r.Izena.toLowerCase().includes(q) && !editVal.toLowerCase().includes(q)) return false;
+    if (filter === "aldatu" && !hasEdit) return false;
+    if (filter === "ondo"   &&  hasEdit) return false;
+    return true;
+  });
+
+  el("izen-orden-count").textContent = `${filtered.length} / ${izenOrdenData.length}`;
+
+  const aldaketak = Object.keys(izenOrdenEdits).length;
+  const btn = el("btn-izen-orden-gorde");
+  if (btn) {
+    btn.style.display = aldaketak ? "inline-flex" : "none";
+    btn.textContent = `💾 Gorde (${aldaketak} aldaketa)`;
+  }
+
+  el("izen-orden-tbody").innerHTML = filtered.length
+    ? filtered.map(r => {
+        const editVal = izenOrdenEdits[r.Txirrindularia_ID];
+        const hasEdit = editVal !== undefined;
+        const displayVal = hasEdit ? editVal : r.Izena;
+        const isChanged = hasEdit && editVal !== r.Izena;
+        return `<tr>
+          <td class="pk-cell">${r.Txirrindularia_ID}</td>
+          <td style="color:${isChanged?'var(--muted)':'var(--text)'}">
+            ${esc(r.Izena)}
+            ${isChanged ? '' : '<span style="font-size:11px;color:#4ade80;margin-left:6px">✓</span>'}
+          </td>
+          <td style="text-align:center;color:var(--muted)">${isChanged ? '→' : ''}</td>
+          <td>
+            <input class="cell-input" value="${esc(displayVal)}"
+              style="border-color:${isChanged ? 'var(--accent2)' : 'transparent'}"
+              oninput="izenOrdenEdit(${r.Txirrindularia_ID}, '${esc(r.Izena)}', this.value)"
+            />
+          </td>
+          <td style="text-align:center">
+            ${isChanged
+              ? `<button class="btn btn-sm btn-ghost" style="font-size:11px"
+                  onclick="izenOrdenReset(${r.Txirrindularia_ID})">↩</button>`
+              : '<span style="color:#4ade80;font-size:13px">✓</span>'
+            }
+          </td>
+        </tr>`;
+      }).join("")
+    : `<tr><td colspan="5" style="color:var(--muted);padding:24px;text-align:center">Ez dago emaitzarik</td></tr>`;
+}
+
+function izenOrdenEdit(tid, original, newVal) {
+  if (newVal.trim() === original) {
+    delete izenOrdenEdits[tid];
+  } else {
+    izenOrdenEdits[tid] = newVal.trim();
+  }
+  // Egoera freskatzen dugu baina input-ak ez ditu berridazten (edizio galdu ez dadin)
+  const aldaketak = Object.keys(izenOrdenEdits).length;
+  const btn = el("btn-izen-orden-gorde");
+  if (btn) {
+    btn.style.display = aldaketak ? "inline-flex" : "none";
+    btn.textContent = `💾 Gorde (${aldaketak} aldaketa)`;
+  }
+}
+
+function izenOrdenReset(tid) {
+  delete izenOrdenEdits[tid];
+  izenOrdenRender();
+}
+
+async function izenOrdenGorde() {
+  const aldaketak = Object.entries(izenOrdenEdits).map(([tid, izena]) => ({
+    Txirrindularia_ID: Number(tid),
+    Izena_Berria: izena,
+  }));
+  if (!aldaketak.length) return showToast("Aldaketarik ez", "err");
+  try {
+    const r = await api("/api/izen-ordenak/apply", { method: "POST", body: JSON.stringify({ aldaketak }) });
+    showToast(`✅ ${r.aldatuta} txirrindulari eguneratu`);
+    await reloadData();
+    await izenOrdenKargatu();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
 async function normalizeIzenak() {
   if (!confirm('Txirrindulari eta porralari izen guztiei Title Case formatua emango zaie (adib: "POGACAR TADEJ" → "Pogacar Tadej"). Jarraitu?')) return;
   try {

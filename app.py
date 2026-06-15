@@ -53,9 +53,9 @@ CSV_PROFILES = {
     "txirrindulari_emaitzak": {
         "label": "Txirrindulari emaitzak (txapelketa)",
         "target": "TxapelketaEmaitzaTxirrindulariak",
-        "fields": ["Posizioa", "Txirrindularia", "Puntuak"],
+        "fields": ["Posizioa", "Txirrindularia", "Puntuak", "Puntuak_Sailkapen_Nag", "Puntuak_Mendian"],
         "context_fields": ["Txapelketa_ID"],
-        "required": ["Txapelketa_ID", "Posizioa", "Txirrindularia", "Puntuak"],
+        "required": ["Txapelketa_ID", "Posizioa", "Txirrindularia"],
         "identity": ["Txapelketa_ID", "Txirrindularia_ID"],
     },
     "porralari_emaitzak": {
@@ -88,6 +88,8 @@ FIELD_ALIASES = {
     "Urtea": ["Urtea", "Year", "Año"],
     "Izena": ["Izena", "Name", "Title", "Nombre"],
     "Dortsala": ["Dortsala", "Dorsala", "Bib", "Dorsal", "Dors"],
+    "Puntuak_Sailkapen_Nag": ["Puntuak_Sailkapen_Nag", "Puntuak_SailkapenNag", "Sailkapen_Nagusia", "SailkapenNagusia", "Sailkapen Nagusia", "Nagusia", "GC", "General"],
+    "Puntuak_Mendian": ["Puntuak_Mendian", "Mendian", "Mendi", "Mountain", "KOM"],
 }
 
 # ─── DB helpers ───────────────────────────────────────────────────────────────
@@ -508,11 +510,17 @@ def _normalize_row(profile_id, mapping, raw, context=None, con=None, create_miss
         if txap_id is None or posizioa is None or not txirr_name:
             return None
         if puntuak is None:
-            puntuak = 0  # Puntuak falta bada 0 erabili errore baten ordez
+            puntuak = 0
         norm = {"Txapelketa_ID": txap_id, "Posizioa": posizioa, "Txirrindularia": txirr_name, "Puntuak": puntuak}
         dortsala = get("Dortsala")
         if dortsala not in (None, ""):
             norm["Dortsala"] = _to_int(dortsala)
+        pun_nag = _to_int(get("Puntuak_Sailkapen_Nag"))
+        if pun_nag is not None:
+            norm["Puntuak_Sailkapen_Nag"] = pun_nag
+        pun_men = _to_int(get("Puntuak_Mendian"))
+        if pun_men is not None:
+            norm["Puntuak_Mendian"] = pun_men
         if con is not None:
             rider_id = _find_txirrindularia_id(con, txirr_name)
             if rider_id is not None:
@@ -603,8 +611,15 @@ def _insert_row(con, profile_id, norm):
         return {"Karrerak_ID": int(cur.lastrowid)}
     if profile_id == "txirrindulari_emaitzak":
         rider_id = norm.get("Txirrindularia_ID") or _ensure_txirrindularia_id(con, norm["Txirrindularia"])
-        con.execute('INSERT INTO "TxapelketaEmaitzaTxirrindulariak" (Txapelketa_ID, Txirrindularia_ID, Posizioa, Puntuak) VALUES (?, ?, ?, ?)',
-            [norm["Txapelketa_ID"], int(rider_id), norm["Posizioa"], norm["Puntuak"]])
+        cols   = ["Txapelketa_ID", "Txirrindularia_ID", "Posizioa", "Puntuak"]
+        vals   = [norm["Txapelketa_ID"], int(rider_id), norm["Posizioa"], norm["Puntuak"]]
+        for opt in ("Puntuak_Sailkapen_Nag", "Puntuak_Mendian"):
+            if opt in norm and norm[opt] is not None:
+                cols.append(opt)
+                vals.append(norm[opt])
+        placeholders = ", ".join("?" * len(cols))
+        col_names    = ", ".join(f'"{c}"' for c in cols)
+        con.execute(f'INSERT INTO "TxapelketaEmaitzaTxirrindulariak" ({col_names}) VALUES ({placeholders})', vals)
         return {"Txapelketa_ID": norm["Txapelketa_ID"], "Txirrindularia_ID": int(rider_id)}
     if profile_id == "porralari_emaitzak":
         ezizen_id = norm.get("Ezizen_ID") or _ensure_ezizen_id(con, norm["Txapelketa_ID"], norm["Ezizena"])
@@ -891,6 +906,63 @@ def merge_preview(kind, keep_id, drop_id):
 
 # ─── HTML ────────────────────────────────────────────────────────────────────
 
+# ─── Izen ordena tresna ──────────────────────────────────────────────────────
+
+def _proposatu_ordena(izena: str) -> str:
+    """
+    Saiatu abizena-izena formatutik izena-abizena formatua proposatzen.
+    Heuristika: lehen hitza guztiz maiuskulaz badago, abizena da.
+    Adib: "ROGLIC Primož" -> "Primož Roglic"
+          "Tadej Pogacar" -> aldaketarik ez (jada ondo)
+          "POGACAR Tadej" -> "Tadej Pogacar"
+    """
+    import re
+    parts = izena.strip().split()
+    if len(parts) < 2:
+        return izena
+    # Lehen hitza guztiz maiuskulaz? (eta ez laburdura)
+    if parts[0] == parts[0].upper() and len(parts[0]) > 2:
+        # Abizena-Izena -> Izena Abizena
+        return " ".join(parts[1:] + [parts[0].title()])
+    return izena  # Jada ondo edo ezin jakin
+
+def get_izen_ordenak() -> list:
+    """Txirrindulari guztiak + proposamen ordena."""
+    with get_db() as con:
+        rows_list = con.execute(
+            'SELECT Txirrindularia_ID, Izena FROM "Txirrindulariak" ORDER BY Izena'
+        ).fetchall()
+    result = []
+    for row in rows_list:
+        izena = row["Izena"]
+        proposamena = _proposatu_ordena(izena)
+        result.append({
+            "Txirrindularia_ID": row["Txirrindularia_ID"],
+            "Izena": izena,
+            "Proposamena": proposamena,
+            "Aldatu": proposamena != izena,
+        })
+    return result
+
+def apply_izen_ordenak(aldaketak: list) -> dict:
+    """
+    aldaketak: [{"Txirrindularia_ID": 1, "Izena_Berria": "Primož Roglic"}, ...]
+    """
+    aldatuta = 0
+    with get_db() as con:
+        for item in aldaketak:
+            tid  = item.get("Txirrindularia_ID")
+            izena = item.get("Izena_Berria", "").strip()
+            if not tid or not izena:
+                continue
+            con.execute(
+                'UPDATE "Txirrindulariak" SET Izena = ? WHERE Txirrindularia_ID = ?',
+                [izena, tid]
+            )
+            aldatuta += 1
+        con.commit()
+    return {"ok": True, "aldatuta": aldatuta}
+
 # ─── Formato normalizatu ──────────────────────────────────────────────────────
 
 def normalize_izenak() -> dict:
@@ -927,6 +999,98 @@ def normalize_izenak() -> dict:
         con.commit()
 
     return {"ok": True, "changed": changed}
+
+# ─── Izena/Abizena ordena tresna ─────────────────────────────────────────────
+
+def _detect_order(name: str) -> str:
+    """
+    Saiatu detektatzen ea izena "ABIZENA Izena" edo "Izena ABIZENA" ordenan dagoen.
+    "ABIZENA Izena": lehen hitza guztiz maiuskulaz (edo maiuskula gehiago ditu).
+    Itzultzen du: "abizena_izena" | "izena_abizena" | "unknown"
+    """
+    parts = name.strip().split()
+    if len(parts) < 2:
+        return "unknown"
+    # Lehen hitza guztiz maiuskulaz?
+    first_upper = parts[0] == parts[0].upper() and any(c.isalpha() for c in parts[0])
+    last_upper  = parts[-1] == parts[-1].upper() and any(c.isalpha() for c in parts[-1])
+    if first_upper and not last_upper:
+        return "abizena_izena"
+    if last_upper and not first_upper:
+        return "izena_abizena"
+    return "unknown"
+
+def _swap_name(name: str) -> str:
+    """
+    "POGACAR Tadej" -> "Tadej Pogacar" (Title Case)
+    Hitz guztiak Title Case-ra pasatzen ditu eta ordena trukatzen du.
+    """
+    parts = name.strip().split()
+    if len(parts) < 2:
+        return name.title()
+    # Bilatu non dagoen banaketa: maiuskula blokea vs minuskula blokea
+    # Aurkitu lehen hitz-multzoa guztiz maiuskulaz (abizena)
+    upper_end = 0
+    for i, p in enumerate(parts):
+        if p == p.upper() and any(c.isalpha() for c in p):
+            upper_end = i + 1
+        else:
+            break
+    if upper_end == 0 or upper_end == len(parts):
+        return " ".join(p.title() for p in parts)
+    abizenak = parts[:upper_end]
+    izenak   = parts[upper_end:]
+    return " ".join(p.title() for p in izenak + abizenak)
+
+def get_txirrindulari_ordenak() -> list:
+    """Txirrindulari guztiak itzuli detektatutako ordenarekin."""
+    with get_db() as con:
+        rows_all = con.execute(
+            'SELECT Txirrindularia_ID, Izena FROM "Txirrindulariak" ORDER BY Izena'
+        ).fetchall()
+    result = []
+    for row in rows_all:
+        order = _detect_order(row["Izena"])
+        result.append({
+            "Txirrindularia_ID": row["Txirrindularia_ID"],
+            "Izena": row["Izena"],
+            "order": order,
+            "suggested": _swap_name(row["Izena"]) if order == "abizena_izena" else None,
+        })
+    return result
+
+def apply_txirrindulari_swap(ids: list) -> dict:
+    """Emandako ID-entzat izena trukatu."""
+    changed = 0
+    skipped = 0
+    errors  = []
+    with get_db() as con:
+        for tid in ids:
+            row = con.execute(
+                'SELECT Izena FROM "Txirrindulariak" WHERE Txirrindularia_ID = ?', [tid]
+            ).fetchone()
+            if not row:
+                skipped += 1
+                continue
+            new_name = _swap_name(row["Izena"])
+            if new_name == row["Izena"]:
+                skipped += 1
+                continue
+            # Egiaztatu izen berria ez dela jada existitzen
+            exists = con.execute(
+                'SELECT 1 FROM "Txirrindulariak" WHERE Izena = ? AND Txirrindularia_ID != ?',
+                [new_name, tid]
+            ).fetchone()
+            if exists:
+                errors.append({"id": tid, "izena": row["Izena"], "reason": f"'{new_name}' jada existitzen da"})
+                continue
+            con.execute(
+                'UPDATE "Txirrindulariak" SET Izena = ? WHERE Txirrindularia_ID = ?',
+                [new_name, tid]
+            )
+            changed += 1
+        con.commit()
+    return {"ok": True, "changed": changed, "skipped": skipped, "errors": errors}
 
 # ─── HTTP Handler ──────────────────────────────────────────────────────────────
 
@@ -1100,6 +1264,22 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/normalize-izenak":
             return self.send_json(normalize_izenak())
+
+        elif path == "/api/izen-ordenak/get":
+            return self.send_json(get_izen_ordenak())
+
+        elif path == "/api/izen-ordenak/apply":
+            aldaketak = data.get("aldaketak", [])
+            return self.send_json(apply_izen_ordenak(aldaketak))
+
+        elif path == "/api/txirrindulari-ordenak":
+            return self.send_json(get_txirrindulari_ordenak())
+
+        elif path == "/api/txirrindulari-swap":
+            ids = data.get("ids", [])
+            if not ids:
+                return self.send_error_json("ids behar dira")
+            return self.send_json(apply_txirrindulari_swap([int(i) for i in ids]))
 
         else:
             self.send_error_json("Not found", 404)
