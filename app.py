@@ -53,7 +53,7 @@ CSV_PROFILES = {
     "txirrindulari_emaitzak": {
         "label": "Txirrindulari emaitzak (txapelketa)",
         "target": "TxapelketaEmaitzaTxirrindulariak",
-        "fields": ["Posizioa", "Txirrindularia", "Puntuak", "Puntuak_Sailkapen_Nag", "Puntuak_Mendian"],
+        "fields": ["Posizioa", "Txirrindularia", "Puntuak", "Puntuak_Sailkapen_Nag", "Puntuak_Mendian", "Zenbatek"],
         "context_fields": ["Txapelketa_ID"],
         "required": ["Txapelketa_ID", "Posizioa", "Txirrindularia"],
         "identity": ["Txapelketa_ID", "Txirrindularia_ID"],
@@ -61,7 +61,7 @@ CSV_PROFILES = {
     "porralari_emaitzak": {
         "label": "Porralari emaitzak (txapelketa)",
         "target": "TxapelketaEmaitzaPorralariak",
-        "fields": ["Posizioa", "Ezizena", "Puntuak"],
+        "fields": ["Posizioa", "Ezizena", "Puntuak", "Puntuak_Mendikoa", "Puntuak_Generala"],
         "context_fields": ["Txapelketa_ID"],
         "required": ["Txapelketa_ID", "Posizioa", "Ezizena", "Puntuak"],
         "identity": ["Txapelketa_ID", "Ezizen_ID"],
@@ -90,6 +90,9 @@ FIELD_ALIASES = {
     "Dortsala": ["Dortsala", "Dorsala", "Bib", "Dorsal", "Dors"],
     "Puntuak_Sailkapen_Nag": ["Puntuak_Sailkapen_Nag", "Puntuak_SailkapenNag", "Sailkapen_Nagusia", "SailkapenNagusia", "Sailkapen Nagusia", "Nagusia", "GC", "General"],
     "Puntuak_Mendian": ["Puntuak_Mendian", "Mendian", "Mendi", "Mountain", "KOM"],
+    "Zenbatek": ["Zenbatek", "Zenbatek?", "Zenbat", "Count", "Kopurua", "Aukeratu"],
+    "Puntuak_Mendikoa": ["Puntuak_Mendikoa", "Mendikoa", "Mendian", "Mendi", "Mountain", "KOM"],
+    "Puntuak_Generala": ["Puntuak_Generala", "Generala", "General", "GC", "Sailkapen Nagusia", "Nagusia"],
 }
 
 # ─── DB helpers ───────────────────────────────────────────────────────────────
@@ -521,6 +524,9 @@ def _normalize_row(profile_id, mapping, raw, context=None, con=None, create_miss
         pun_men = _to_int(get("Puntuak_Mendian"))
         if pun_men is not None:
             norm["Puntuak_Mendian"] = pun_men
+        zenbatek = _to_int(get("Zenbatek"))
+        if zenbatek is not None:
+            norm["Zenbatek"] = zenbatek
         if con is not None:
             rider_id = _find_txirrindularia_id(con, txirr_name)
             if rider_id is not None:
@@ -537,6 +543,10 @@ def _normalize_row(profile_id, mapping, raw, context=None, con=None, create_miss
         if txap_id is None or posizioa is None or not ezizena or puntuak is None:
             return None
         norm = {"Txapelketa_ID": txap_id, "Posizioa": posizioa, "Ezizena": ezizena, "Puntuak": puntuak}
+        for opt_field in ("Puntuak_Mendikoa", "Puntuak_Generala"):
+            val = _to_int(get(opt_field))
+            if val is not None:
+                norm[opt_field] = val
         if con is not None:
             ezizen_id = _find_ezizen_id(con, txap_id, ezizena)
             if ezizen_id is not None:
@@ -613,9 +623,10 @@ def _insert_row(con, profile_id, norm):
         rider_id = norm.get("Txirrindularia_ID") or _ensure_txirrindularia_id(con, norm["Txirrindularia"])
         cols   = ["Txapelketa_ID", "Txirrindularia_ID", "Posizioa", "Puntuak"]
         vals   = [norm["Txapelketa_ID"], int(rider_id), norm["Posizioa"], norm["Puntuak"]]
-        for opt in ("Puntuak_Sailkapen_Nag", "Puntuak_Mendian"):
+        DB_COL_MAP = {"Zenbatek": "Zenbatek?"}
+        for opt in ("Puntuak_Sailkapen_Nag", "Puntuak_Mendian", "Zenbatek"):
             if opt in norm and norm[opt] is not None:
-                cols.append(opt)
+                cols.append(DB_COL_MAP.get(opt, opt))
                 vals.append(norm[opt])
         placeholders = ", ".join("?" * len(cols))
         col_names    = ", ".join(f'"{c}"' for c in cols)
@@ -623,8 +634,15 @@ def _insert_row(con, profile_id, norm):
         return {"Txapelketa_ID": norm["Txapelketa_ID"], "Txirrindularia_ID": int(rider_id)}
     if profile_id == "porralari_emaitzak":
         ezizen_id = norm.get("Ezizen_ID") or _ensure_ezizen_id(con, norm["Txapelketa_ID"], norm["Ezizena"])
-        con.execute('INSERT INTO "TxapelketaEmaitzaPorralariak" (Txapelketa_ID, Ezizen_ID, Posizioa, Puntuak) VALUES (?, ?, ?, ?)',
-            [norm["Txapelketa_ID"], int(ezizen_id), norm["Posizioa"], norm["Puntuak"]])
+        cols = ["Txapelketa_ID", "Ezizen_ID", "Posizioa", "Puntuak"]
+        vals = [norm["Txapelketa_ID"], int(ezizen_id), norm["Posizioa"], norm["Puntuak"]]
+        for opt in ("Puntuak_Mendikoa", "Puntuak_Generala"):
+            if opt in norm and norm[opt] is not None:
+                cols.append(opt)
+                vals.append(norm[opt])
+        placeholders = ", ".join("?" * len(cols))
+        col_names = ", ".join(f'"{c}"' for c in cols)
+        con.execute(f'INSERT INTO "TxapelketaEmaitzaPorralariak" ({col_names}) VALUES ({placeholders})', vals)
         return {"Txapelketa_ID": norm["Txapelketa_ID"], "Ezizen_ID": int(ezizen_id)}
     if profile_id == "karrera_txirrindulari_emaitzak":
         rider_id = norm.get("Txirrindularia_ID") or _ensure_txirrindularia_id(con, norm["Txirrindularia"])
@@ -712,13 +730,16 @@ def csv_preview(payload):
     return {"will_insert": will_insert, "already_exists": already_exists, "errors": errors}
 
 def csv_import(payload):
-    profile   = payload.get("profile") or payload.get("table", "")
-    mapping   = payload.get("mapping", {})
-    raw       = payload.get("rows", [])
-    context   = payload.get("context", {})
-    label     = payload.get("label", f"CSV → {profile}")
+    profile        = payload.get("profile") or payload.get("table", "")
+    mapping        = payload.get("mapping", {})
+    raw            = payload.get("rows", [])
+    context        = payload.get("context", {})
+    label          = payload.get("label", f"CSV → {profile}")
     # merge_map: {csv_name: txirrindularia_id} - erabiltzaileak erabakitako fusio-map
     merge_map: dict = payload.get("merge_map", {})
+    # update_fields: zerrenda, jada dauden erregistroetan eguneratu beharreko zutabeak
+    # Adib: ["Zenbatek"] -> erregistroa badago, "Zenbatek?" zutabea eguneratu
+    update_fields: list = payload.get("update_fields", [])
     spec = _profile_spec(profile)
     if not spec:
         return {"inserted": 0, "skipped": 0, "errors": [{"row": {}, "reason": f"CSV profila ezezaguna: {profile}"}], "batch_id": len(_undo_stack)}
@@ -744,6 +765,26 @@ def csv_import(payload):
                         norm["Txirrindularia_ID"] = int(mapped_id)
             exists, _ = _row_exists(con, profile, norm)
             if exists:
+                if update_fields and profile == "txirrindulari_emaitzak":
+                    # Eguneratu zehaztu diren zutabeak
+                    rider_id = norm.get("Txirrindularia_ID")
+                    if rider_id:
+                        DB_COL_MAP = {"Zenbatek": "Zenbatek?"}
+                        set_parts, set_vals = [], []
+                        for f in update_fields:
+                            db_col = DB_COL_MAP.get(f, f)
+                            if f in norm and norm[f] is not None:
+                                set_parts.append(f'"{db_col}" = ?')
+                                set_vals.append(norm[f])
+                        if set_parts:
+                            set_sql = ", ".join(set_parts)
+                            con.execute(
+                                f'UPDATE "TxapelketaEmaitzaTxirrindulariak" SET {set_sql} '                                f'WHERE Txapelketa_ID = ? AND Txirrindularia_ID = ?',
+                                set_vals + [norm["Txapelketa_ID"], int(rider_id)]
+                            )
+                            inserted_identities.append({"Txapelketa_ID": norm["Txapelketa_ID"], "Txirrindularia_ID": int(rider_id)})
+                            inserted_rows.append(norm)
+                            continue
                 skipped += 1
                 continue
             try:
@@ -962,6 +1003,53 @@ def apply_izen_ordenak(aldaketak: list) -> dict:
             aldatuta += 1
         con.commit()
     return {"ok": True, "aldatuta": aldatuta}
+
+# ─── Zenbat porra kalkulatu ───────────────────────────────────────────────────
+
+def recalculate_zenbat_porra() -> dict:
+    """
+    Porralari bakoitzak zenbat txapelketatan parte hartu duen kalkulatu
+    EzizenPorralariak taulatik, eta Porralariak."Zenbat Porra" eguneratu.
+    """
+    with get_db() as con:
+        # Porralari bakoitzarentzat zenbat ezizen (= txapelketa) dituen zenbatu
+        counts = con.execute('''
+            SELECT ep.Porralaria_ID, COUNT(DISTINCT pe.Txapelketa_ID) AS kopurua
+            FROM "EzizenPorralariak" ep
+            JOIN "PorralariEzizenak" pe ON ep.Ezizen_ID = pe.Ezizen_ID
+            GROUP BY ep.Porralaria_ID
+        ''').fetchall()
+
+        aldatuta = 0
+        for row in counts:
+            pid     = row["Porralaria_ID"]
+            kopurua = row["kopurua"]
+            current = con.execute(
+                'SELECT "Zenbat Porra" FROM "Porralariak" WHERE Porralaria_ID = ?', [pid]
+            ).fetchone()
+            if current and current["Zenbat Porra"] != kopurua:
+                con.execute(
+                    'UPDATE "Porralariak" SET "Zenbat Porra" = ? WHERE Porralaria_ID = ?',
+                    [kopurua, pid]
+                )
+                aldatuta += 1
+
+        # Porrarik ez duten porralariak 0-ra ezarri
+        all_ids = {r["Porralaria_ID"] for r in con.execute('SELECT Porralaria_ID FROM "Porralariak"').fetchall()}
+        counted_ids = {r["Porralaria_ID"] for r in counts}
+        for pid in all_ids - counted_ids:
+            current = con.execute(
+                'SELECT "Zenbat Porra" FROM "Porralariak" WHERE Porralaria_ID = ?', [pid]
+            ).fetchone()
+            if current and current["Zenbat Porra"] != 0:
+                con.execute(
+                    'UPDATE "Porralariak" SET "Zenbat Porra" = 0 WHERE Porralaria_ID = ?', [pid]
+                )
+                aldatuta += 1
+
+        con.commit()
+
+    return {"ok": True, "aldatuta": aldatuta, "total": len(counts)}
 
 # ─── Formato normalizatu ──────────────────────────────────────────────────────
 
@@ -1261,6 +1349,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(merge_porralariak(int(keep_id), int(drop_id)))
             else:
                 return self.send_error_json(f"Mota ezezaguna: {kind}")
+
+        elif path == "/api/recalculate-zenbat-porra":
+            return self.send_json(recalculate_zenbat_porra())
 
         elif path == "/api/normalize-izenak":
             return self.send_json(normalize_izenak())
