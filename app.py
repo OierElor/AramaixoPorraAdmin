@@ -749,7 +749,8 @@ def csv_import(payload):
     errors = []
     with get_db() as con:
         for raw_row in raw:
-            norm = _normalize_row(profile, mapping, raw_row, context, con, create_missing=True)
+            # create_missing=False: ez sortu txirrindularirik oraindik, merge_map aplikatu aurretik
+            norm = _normalize_row(profile, mapping, raw_row, context, con, create_missing=False)
             if norm is None:
                 errors.append({"row": raw_row, "reason": "Eremu batzuk falta dira"})
                 continue
