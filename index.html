@@ -112,6 +112,21 @@
     .merge-name{font-size:15px;font-weight:600;}
     .merge-name.keep{color:#4ade80;}
     .merge-name.drop{color:var(--accent);}
+    .karrera-item{padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .1s;}
+    .karrera-item:last-child{border-bottom:none;}
+    .karrera-item:hover{background:rgba(255,255,255,.04);}
+    .karrera-item.active{background:rgba(230,57,70,.08);border-left:3px solid var(--accent);padding-left:13px;}
+    .karrera-item-name{font-size:13px;font-weight:500;color:var(--text);}
+    .karrera-item-meta{font-size:11px;color:var(--muted);margin-top:2px;display:flex;gap:6px;align-items:center;}
+    .kat-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.3px;}
+    .kat-Monumentua{background:rgba(244,196,48,.18);color:#f4c430;}
+    .kat-4{background:rgba(249,115,22,.18);color:#f97316;}
+    .kat-5{background:rgba(99,102,241,.18);color:#818cf8;}
+    .kat-Proseries{background:rgba(168,85,247,.18);color:#c084fc;}
+    .kat-Berezia{background:rgba(230,57,70,.18);color:var(--accent);}
+    .pos-medal-1{color:#f4c430;font-weight:700;}
+    .pos-medal-2{color:#c0c0c0;font-weight:700;}
+    .pos-medal-3{color:#cd7f32;font-weight:700;}
     @media(max-width:900px){.sidebar{display:none;}.main{padding:20px;}.stats-row{grid-template-columns:1fr 1fr;}.form-grid{grid-template-columns:1fr;}}
   </style>
 </head>
@@ -125,6 +140,7 @@
     <div class="nav-item" data-section="txirrindulariak"><span class="icon">🚴</span> Txirrindulariak</div>
     <div class="nav-item" data-section="txapelketak"><span class="icon">🗓️</span> Txapelketak</div>
     <div class="nav-item" data-section="sailkapenak"><span class="icon">📋</span> Sailkapenak</div>
+    <div class="nav-item" data-section="karrera-emaitzak"><span class="icon">🏁</span> Karrera emaitzak</div>
     <div class="nav-item" data-section="taulak"><span class="icon">▦</span> Taula guztiak</div>
     <div class="nav-sub-list" id="table-nav-list"></div>
     <div class="nav-section">Sartu</div>
@@ -187,6 +203,41 @@
       <div class="card">
         <div class="toolbar"><select class="filter-sel" id="sail-txap-sel" style="min-width:200px"><option value="">— Txapelketa guztiak —</option></select><input class="search-input" id="sail-search" placeholder="Bilatu..."/></div>
         <div class="tbl-wrap"><table><thead id="sail-thead"></thead><tbody id="sail-tbody"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- KARRERA EMAITZAK -->
+    <section class="section" id="sec-karrera-emaitzak">
+      <div class="page-header"><div><div class="page-title">🏁 Karrera emaitzak</div><div class="page-sub">Karrera bakoitzaren sailkapena eta puntuazioa</div></div></div>
+      <div style="display:grid;grid-template-columns:290px 1fr;gap:16px;align-items:start">
+        <div>
+          <div style="margin-bottom:10px">
+            <select class="filter-sel" id="race-txap-sel" style="width:100%">
+              <option value="">— Txapelketa guztiak —</option>
+            </select>
+          </div>
+          <div class="card" style="max-height:calc(100vh - 200px);overflow-y:auto;">
+            <div class="card-head" style="padding:12px 16px"><div class="card-title" style="font-size:13px">Karrerak</div></div>
+            <div id="karrera-list"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title" id="race-results-title" style="display:flex;align-items:center;gap:10px">
+              <span id="race-results-name" style="color:var(--muted)">— Karrera bat aukeratu —</span>
+              <span class="kat-badge" id="race-results-kat" style="display:none"></span>
+            </div>
+            <span style="color:var(--muted);font-size:12px" id="race-results-txap"></span>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th style="width:60px">#</th><th>Txirrindularia</th><th style="text-align:right;width:100px">Puntuak</th></tr></thead>
+              <tbody id="race-results-tbody">
+                <tr><td colspan="3" style="color:var(--muted);padding:32px;text-align:center">Ezkerreko zerrendatik karrera bat aukeratu</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -325,6 +376,7 @@ function setSection(id) {
   document.querySelector(`.nav-item[data-section="${id}"]`)?.classList.add("active");
   if (id === "merge") renderMergeSection();
   if (id === "ezizenak") loadEzizenak();
+  if (id === "karrera-emaitzak") { renderRaceTxapSel(); renderKarreraList(); }
 }
 
 document.querySelectorAll(".nav-item[data-section]").forEach(item => {
@@ -1148,6 +1200,86 @@ function bindMergeEvents() {
   el("btn-merge-preview")?.addEventListener("click", runMergePreview);
 }
 
+// ── Karrera emaitzak ──────────────────────────────────────────────────────────
+const KAT_LABELS = {'Monumentua':'Monumentua','4':'S4','5':'S5','Proseries':'Pro','Berezia':'Berezia'};
+
+function katClass(kat) {
+  if (!kat) return '';
+  if (kat === '4') return 'kat-4';
+  if (kat === '5') return 'kat-5';
+  return 'kat-' + kat;
+}
+
+function renderRaceTxapSel() {
+  const sel = el('race-txap-sel');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = `<option value="">— Txapelketa guztiak —</option>` +
+    state.txapelketak.map(t => `<option value="${t.Txapelketa_ID}">${esc(t.Izena)} ${esc(t.Urtea)}</option>`).join('');
+  if (prev) sel.value = prev;
+}
+
+function renderKarreraList() {
+  const txapId = el('race-txap-sel')?.value ? Number(el('race-txap-sel').value) : null;
+  const list = txapId
+    ? state.karrerak.filter(k => k.Txapelketa_ID === txapId)
+    : state.karrerak;
+  const listEl = el('karrera-list');
+  if (!listEl) return;
+  if (!list.length) {
+    listEl.innerHTML = '<div style="color:var(--muted);padding:16px;font-size:13px">Ez dago karrerarik</div>';
+    return;
+  }
+  listEl.innerHTML = list.map(k => {
+    const kat = k.Kategoria || '';
+    const katHtml = kat ? `<span class="kat-badge ${katClass(kat)}">${esc(KAT_LABELS[kat] || kat)}</span>` : '';
+    const txap = state.txapelketak.find(t => t.Txapelketa_ID === k.Txapelketa_ID);
+    const txapLabel = txapId ? '' : `<span style="opacity:.6">${esc(txap?.Izena || '')}</span>`;
+    return `<div class="karrera-item" data-id="${k.Karrerak_ID}" onclick="loadKarreraEmaitza(${k.Karrerak_ID}, this)">
+      <div class="karrera-item-name">${esc(k.Izena)}</div>
+      <div class="karrera-item-meta">${esc(k.Urtea)} ${katHtml} ${txapLabel}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadKarreraEmaitza(karreraId, itemEl) {
+  document.querySelectorAll('.karrera-item').forEach(el2 => el2.classList.remove('active'));
+  if (itemEl) itemEl.classList.add('active');
+  const tbody = el('race-results-tbody');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);padding:24px;text-align:center">Kargatzen...</td></tr>';
+  try {
+    const data = await api('/api/karrera-emaitza?karrera_id=' + karreraId);
+    const k = data.karrera;
+    const kat = k.Kategoria || '';
+    const nameEl = el('race-results-name');
+    const katEl  = el('race-results-kat');
+    const txapEl = el('race-results-txap');
+    if (nameEl) nameEl.textContent = k.Izena;
+    if (nameEl) nameEl.style.color = 'var(--text)';
+    if (katEl) {
+      katEl.textContent = KAT_LABELS[kat] || kat;
+      katEl.className = 'kat-badge ' + katClass(kat);
+      katEl.style.display = kat ? '' : 'none';
+    }
+    if (txapEl) txapEl.textContent = (k.Txapelketa || '') + ' · ' + k.Urtea;
+    if (tbody) {
+      if (!data.sailkapena.length) {
+        tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);padding:24px;text-align:center">Ez dago emaitzarik</td></tr>';
+        return;
+      }
+      tbody.innerHTML = data.sailkapena.map(r => {
+        const pos = r.Sailkapena;
+        const posClass = pos === 1 ? 'pos-medal-1' : pos === 2 ? 'pos-medal-2' : pos === 3 ? 'pos-medal-3' : '';
+        return `<tr>
+          <td><span class="${posClass || 'badge'}">${esc(pos)}</span></td>
+          <td>${esc(r.Txirrindularia)}</td>
+          <td style="text-align:right;font-weight:600;color:var(--accent2)">${esc(r.Puntuak)}</td>
+        </tr>`;
+      }).join('');
+    }
+  } catch(e) { showToast(e.message, 'err'); }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function txirriSwapIzena(tid, izenBerria) {
@@ -1193,6 +1325,7 @@ async function init() {
   el("csv-type")?.addEventListener("change", renderCSVSteps);
   el("ezizen-search")?.addEventListener("input", renderEzizenak);
   el("ezizen-filter")?.addEventListener("change", renderEzizenak);
+  el("race-txap-sel")?.addEventListener("change", renderKarreraList);
   document.querySelectorAll(".tab[data-sltab]").forEach(t => {
     t.addEventListener("click", ()=>{
       document.querySelectorAll(".tab[data-sltab]").forEach(x=>x.classList.remove("active"));

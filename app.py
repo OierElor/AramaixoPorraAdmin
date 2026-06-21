@@ -9,7 +9,7 @@ import os
 import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, parse_qs
 
 BASE_DIR = Path(__file__).parent
 SCHEMA   = BASE_DIR / "schema.sql"
@@ -1238,6 +1238,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(rows(con,
                     'SELECT ks.*, t.Izena AS Txirrindularia FROM "KarreraSailkapena" ks '
                     'JOIN "Txirrindulariak" t ON ks.Txirrindularia_ID = t.Txirrindularia_ID ORDER BY ks.Karrera_ID, ks.Puntuak DESC'))
+            if path == "/api/karrera-emaitza":
+                params = parse_qs(parsed.query)
+                karrera_id = params.get("karrera_id", [None])[0]
+                if not karrera_id:
+                    return self.send_error_json("karrera_id parametroa behar da", 400)
+                karrera = con.execute(
+                    'SELECT k.*, tx.Izena AS Txapelketa FROM "Karrerak" k '
+                    'JOIN "Txapelketak" tx ON k.Txapelketa_ID = tx.Txapelketa_ID '
+                    'WHERE k.Karrerak_ID = ?', [int(karrera_id)]
+                ).fetchone()
+                if not karrera:
+                    return self.send_error_json("Karrera ez da aurkitu", 404)
+                sailkapena = rows(con,
+                    'SELECT ks.Sailkapena, t.Izena AS Txirrindularia, ks.Puntuak '
+                    'FROM "KarreraSailkapena" ks '
+                    'JOIN "Txirrindulariak" t ON ks.Txirrindularia_ID = t.Txirrindularia_ID '
+                    'WHERE ks.Karrera_ID = ? ORDER BY ks.Sailkapena',
+                    [int(karrera_id)]
+                )
+                return self.send_json({"karrera": dict(karrera), "sailkapena": sailkapena})
             if path == "/api/ezizenak":
                 return self.send_json(rows(con,
                     'SELECT ez.Ezizen_ID, ez.Ezizena, ez.Txapelketa_ID, '
