@@ -116,6 +116,16 @@ def get_db():
     return con
 
 def init_db():
+    # DB-a jada badago (Txapelketak taula du), EZ exekutatu schema.sql:
+    # schema.sql zaharkituta dago eta itzal-taula hutsak sor litzake.
+    con = get_db()
+    try:
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Txapelketak'"
+        ).fetchone():
+            return
+    finally:
+        con.close()
     if not SCHEMA.exists():
         print("Warning: schema.sql not found")
         return
@@ -427,7 +437,7 @@ def _ensure_txirrindularia_id(con, name: str) -> int:
 
 def _find_ezizen_id(con, txapelketa_id: int, ezizena: str):
     row = con.execute(
-        'SELECT Ezizen_ID FROM "PorralariEzizenak" WHERE Txapelketa_ID = ? AND Ezizena = ?',
+        'SELECT Ezizen_ID FROM "PorraEzizenak" WHERE Txapelketa_ID = ? AND Ezizena = ?',
         [txapelketa_id, ezizena],
     ).fetchone()
     return row[0] if row else None
@@ -437,7 +447,7 @@ def _ensure_ezizen_id(con, txapelketa_id: int, ezizena: str) -> int:
     if eid is not None:
         return int(eid)
     cur = con.execute(
-        'INSERT INTO "PorralariEzizenak" (Txapelketa_ID, Ezizena) VALUES (?, ?)',
+        'INSERT INTO "PorraEzizenak" (Txapelketa_ID, Ezizena) VALUES (?, ?)',
         [txapelketa_id, ezizena],
     )
     return int(cur.lastrowid)
@@ -867,7 +877,7 @@ TXIRRINDULARIA_REFS = [
 ]
 
 PORRALARIA_REFS = [
-    ("EzizenPorralariak", "Porralaria_ID", ["Ezizen_ID", "Porralaria_ID"]),
+    ("PorralariTaldeenEzizenak", "Porralaria_ID", ["Ezizen_ID", "Porralaria_ID"]),
 ]
 
 def _do_merge_refs(con, table, col, pks, keep_id, drop_id):
@@ -893,6 +903,156 @@ def _do_merge_refs(con, table, col, pks, keep_id, drop_id):
             con.execute(f'UPDATE "{table}" SET "{col}" = ? WHERE {pk_clause}', [keep_id] + old_pk_vals)
             migrated += 1
     return {"table": table, "migrated": migrated, "skipped": skipped}
+
+def api_ezizenak(con):
+    """Ezizen guztiak, bakoitzari lotutako porralarien zerrendarekin (anitz izan daiteke)."""
+    ez_rows = rows(con,
+        'SELECT ez.Ezizen_ID, ez.Ezizena, ez.Txapelketa_ID, t.Izena AS Txapelketa, t.Urtea AS Urtea '
+        'FROM "PorraEzizenak" ez '
+        'LEFT JOIN "Txapelketak" t ON ez.Txapelketa_ID = t.Txapelketa_ID '
+        'ORDER BY t.Urtea DESC, ez.Ezizena')
+    link_rows = rows(con,
+        'SELECT ep.Ezizen_ID, p.Porralaria_ID, p.Izena '
+        'FROM "PorralariTaldeenEzizenak" ep '
+        'JOIN "Porralariak" p ON ep.Porralaria_ID = p.Porralaria_ID '
+        'ORDER BY p.Izena')
+    by_ezizen = {}
+    for lr in link_rows:
+        by_ezizen.setdefault(lr["Ezizen_ID"], []).append(
+            {"Porralaria_ID": lr["Porralaria_ID"], "Izena": lr["Izena"]})
+    for r in ez_rows:
+        pl = by_ezizen.get(r["Ezizen_ID"], [])
+        r["Porralariak"] = pl
+        # Atzera-bateragarritasuna: lehen porralaria + izen bateratua
+        r["Porralaria_ID"] = pl[0]["Porralaria_ID"] if pl else None
+        r["Porralaria"] = ", ".join(x["Izena"] for x in pl) if pl else None
+    return ez_rows
+
+def _recompute_zenbat_porra(con, porralaria_ids):
+    """Emandako porralarien 'Zenbat Porra' lotura-kopurutik eguneratu."""
+    for pid in set(p for p in porralaria_ids if p):
+        n = con.execute(
+            'SELECT COUNT(*) FROM "PorralariTaldeenEzizenak" WHERE Porralaria_ID = ?', [pid]
+        ).fetchone()[0]
+        con.execute('UPDATE "Porralariak" SET "Zenbat Porra" = ? WHERE Porralaria_ID = ?',
+                    [max(n, 1), pid])
+
+def _porralaria_ezizenak(con, porralaria_id):
+    """Porralari batek lotuta dituen ezizenak (txapelketarekin)."""
+    return rows(con,
+        'SELECT ez.Ezizen_ID, ez.Ezizena, ez.Txapelketa_ID, t.Izena AS Txapelketa '
+        'FROM "PorralariTaldeenEzizenak" ep '
+        'JOIN "PorraEzizenak" ez ON ep.Ezizen_ID = ez.Ezizen_ID '
+        'LEFT JOIN "Txapelketak" t ON ez.Txapelketa_ID = t.Txapelketa_ID '
+        'WHERE ep.Porralaria_ID = ? ORDER BY t.Urtea DESC, ez.Ezizena',
+        [porralaria_id])
+
+def _get_or_create_porralaria(con, izena):
+    izena = (izena or "").strip()
+    if not izena:
+        return None
+    row = con.execute('SELECT Porralaria_ID FROM "Porralariak" WHERE Izena = ?', [izena]).fetchone()
+    if row:
+        return row[0]
+    cur = con.execute('INSERT INTO "Porralariak" (Izena, "Zenbat Porra") VALUES (?, 1)', [izena])
+    return cur.lastrowid
+
+def ezizen_lotu(data):
+    """Ezizen bati porralari multzo bat esleitu (lehengoa ordezkatuz).
+    data: { ezizen_id, porralaria_ids?:[...], porralaria_id?, new_porralariak?:[izenak] }"""
+    ezizen_id = data.get("ezizen_id")
+    if not ezizen_id:
+        return {"ok": False, "reason": "ezizen_id behar da"}
+    ids = list(data.get("porralaria_ids") or [])
+    if data.get("porralaria_id"):
+        ids.append(data["porralaria_id"])
+    has_set = ("porralaria_ids" in data) or ("porralaria_id" in data) or bool(data.get("new_porralariak"))
+    if not has_set:
+        return {"ok": False, "reason": "porralaria_ids edo new_porralariak behar dira"}
+    try:
+        with get_db() as con:
+            ez = con.execute('SELECT Ezizen_ID FROM "PorraEzizenak" WHERE Ezizen_ID = ?', [ezizen_id]).fetchone()
+            if not ez:
+                return {"ok": False, "reason": f"Ezizen_ID {ezizen_id} ez da existitzen"}
+            # Izen berriak sortu
+            for izena in (data.get("new_porralariak") or []):
+                pid = _get_or_create_porralaria(con, izena)
+                if pid:
+                    ids.append(pid)
+            target = []
+            for x in ids:
+                xi = int(x)
+                if xi not in target:
+                    target.append(xi)
+            # Porralariak existitzen direla egiaztatu (mezu argia emateko)
+            for pid in target:
+                if not con.execute('SELECT 1 FROM "Porralariak" WHERE Porralaria_ID = ?', [pid]).fetchone():
+                    return {"ok": False, "reason": f"Porralaria_ID {pid} ez da existitzen"}
+            # Lehengo loturak (Zenbat Porra birkalkulatzeko)
+            prev = [r[0] for r in con.execute(
+                'SELECT Porralaria_ID FROM "PorralariTaldeenEzizenak" WHERE Ezizen_ID = ?', [ezizen_id]).fetchall()]
+            con.execute('DELETE FROM "PorralariTaldeenEzizenak" WHERE Ezizen_ID = ?', [ezizen_id])
+            for pid in target:
+                con.execute('INSERT OR IGNORE INTO "PorralariTaldeenEzizenak" (Ezizen_ID, Porralaria_ID) VALUES (?, ?)',
+                            [ezizen_id, pid])
+            _recompute_zenbat_porra(con, set(prev) | set(target))
+            con.commit()
+            porralariak = rows(con,
+                'SELECT p.Porralaria_ID, p.Izena FROM "PorralariTaldeenEzizenak" ep '
+                'JOIN "Porralariak" p ON ep.Porralaria_ID = p.Porralaria_ID '
+                'WHERE ep.Ezizen_ID = ? ORDER BY p.Izena', [ezizen_id])
+        return {"ok": True, "ezizen_id": ezizen_id, "porralariak": porralariak}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+def porralari_split(data):
+    """Porralari bat banatu: aukeratutako ezizenak beste porralari bati esleitu.
+    data: { source_id, ezizen_ids:[...], target_id? , new_izena? }
+    target: lehendik dagoena (target_id) edo berria (new_izena)."""
+    source_id = data.get("source_id")
+    ezizen_ids = [int(x) for x in (data.get("ezizen_ids") or [])]
+    target_id = data.get("target_id")
+    new_izena = (data.get("new_izena") or "").strip()
+    if not source_id:
+        return {"ok": False, "reason": "source_id behar da"}
+    if not ezizen_ids:
+        return {"ok": False, "reason": "Gutxienez ezizen bat aukeratu behar da"}
+    if not target_id and not new_izena:
+        return {"ok": False, "reason": "Helburu porralaria (lehendik edo berria) behar da"}
+    try:
+        with get_db() as con:
+            src = con.execute('SELECT Izena FROM "Porralariak" WHERE Porralaria_ID = ?', [source_id]).fetchone()
+            if not src:
+                return {"ok": False, "reason": f"Porralaria {source_id} ez da existitzen"}
+            if target_id:
+                target_id = int(target_id)
+                tgt = con.execute('SELECT Izena FROM "Porralariak" WHERE Porralaria_ID = ?', [target_id]).fetchone()
+                if not tgt:
+                    return {"ok": False, "reason": f"Helburu porralaria {target_id} ez da existitzen"}
+                if target_id == int(source_id):
+                    return {"ok": False, "reason": "Iturria eta helburua ezin dira berdinak izan"}
+            else:
+                target_id = _get_or_create_porralaria(con, new_izena)
+            moved = 0
+            for eid in ezizen_ids:
+                # Ezizena benetan iturriarena dela egiaztatu
+                link = con.execute(
+                    'SELECT 1 FROM "PorralariTaldeenEzizenak" WHERE Ezizen_ID = ? AND Porralaria_ID = ?',
+                    [eid, source_id]).fetchone()
+                if not link:
+                    continue
+                con.execute('DELETE FROM "PorralariTaldeenEzizenak" WHERE Ezizen_ID = ? AND Porralaria_ID = ?',
+                            [eid, source_id])
+                con.execute('INSERT OR IGNORE INTO "PorralariTaldeenEzizenak" (Ezizen_ID, Porralaria_ID) VALUES (?, ?)',
+                            [eid, target_id])
+                moved += 1
+            _recompute_zenbat_porra(con, {int(source_id), int(target_id)})
+            con.commit()
+            tgt_izena = con.execute('SELECT Izena FROM "Porralariak" WHERE Porralaria_ID = ?', [target_id]).fetchone()[0]
+        return {"ok": True, "source_id": int(source_id), "target_id": int(target_id),
+                "target_izena": tgt_izena, "moved": moved}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
 
 def merge_txirrindulariak(keep_id, drop_id):
     with get_db() as con:
@@ -943,6 +1103,9 @@ def merge_preview(kind, keep_id, drop_id):
         result = {"ok": True, "keep": {"id": keep_id, "izena": dict(keep)["Izena"]}, "dropped": {"id": drop_id, "izena": dict(drop)["Izena"]}, "refs": refs}
         if kind == "porralariak":
             result["zenbat_porra_merged"] = (dict(keep).get("Zenbat Porra") or 1) + (dict(drop).get("Zenbat Porra") or 1)
+            # Porralari bakoitzaren ezizenak erakutsi, zer fusionatzen den ikusteko
+            result["keep"]["ezizenak"] = _porralaria_ezizenak(con, keep_id)
+            result["dropped"]["ezizenak"] = _porralaria_ezizenak(con, drop_id)
         return result
 
 
@@ -1010,14 +1173,14 @@ def apply_izen_ordenak(aldaketak: list) -> dict:
 def recalculate_zenbat_porra() -> dict:
     """
     Porralari bakoitzak zenbat txapelketatan parte hartu duen kalkulatu
-    EzizenPorralariak taulatik, eta Porralariak."Zenbat Porra" eguneratu.
+    PorralariTaldeenEzizenak taulatik, eta Porralariak."Zenbat Porra" eguneratu.
     """
     with get_db() as con:
         # Porralari bakoitzarentzat zenbat ezizen (= txapelketa) dituen zenbatu
         counts = con.execute('''
             SELECT ep.Porralaria_ID, COUNT(DISTINCT pe.Txapelketa_ID) AS kopurua
-            FROM "EzizenPorralariak" ep
-            JOIN "PorralariEzizenak" pe ON ep.Ezizen_ID = pe.Ezizen_ID
+            FROM "PorralariTaldeenEzizenak" ep
+            JOIN "PorraEzizenak" pe ON ep.Ezizen_ID = pe.Ezizen_ID
             GROUP BY ep.Porralaria_ID
         ''').fetchall()
 
@@ -1215,7 +1378,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/porralariak":
                 return self.send_json(rows(con,
                     'SELECT p.Porralaria_ID, p.Izena, COUNT(ep.Ezizen_ID) AS "Zenbat Porra" '
-                    'FROM "Porralariak" p LEFT JOIN "EzizenPorralariak" ep ON p.Porralaria_ID = ep.Porralaria_ID '
+                    'FROM "Porralariak" p LEFT JOIN "PorralariTaldeenEzizenak" ep ON p.Porralaria_ID = ep.Porralaria_ID '
                     'GROUP BY p.Porralaria_ID ORDER BY p.Izena'))
             if path == "/api/txirrindulariak":
                 return self.send_json(rows(con, 'SELECT * FROM "Txirrindulariak" ORDER BY Izena'))
@@ -1228,11 +1391,15 @@ class Handler(BaseHTTPRequestHandler):
                     'SELECT e.*, t.Izena AS Txirrindularia FROM "TxapelketaEmaitzaTxirrindulariak" e '
                     'JOIN "Txirrindulariak" t ON e.Txirrindularia_ID = t.Txirrindularia_ID ORDER BY e.Txapelketa_ID, e.Posizioa'))
             if path == "/api/porralari-emaitzak":
+                # Ezizen batek porralari anitz izan ditzake (talde-porra): izenak batu, errenkadak ez bikoizteko.
                 return self.send_json(rows(con,
-                    'SELECT e.*, ez.Ezizena, p.Izena AS Porralaria FROM "TxapelketaEmaitzaPorralariak" e '
-                    'JOIN "PorralariEzizenak" ez ON e.Ezizen_ID = ez.Ezizen_ID '
-                    'LEFT JOIN "EzizenPorralariak" ep ON ez.Ezizen_ID = ep.Ezizen_ID '
+                    'SELECT e.*, ez.Ezizena, '
+                    'GROUP_CONCAT(p.Izena, ", ") AS Porralaria '
+                    'FROM "TxapelketaEmaitzaPorralariak" e '
+                    'JOIN "PorraEzizenak" ez ON e.Ezizen_ID = ez.Ezizen_ID '
+                    'LEFT JOIN "PorralariTaldeenEzizenak" ep ON ez.Ezizen_ID = ep.Ezizen_ID '
                     'LEFT JOIN "Porralariak" p ON ep.Porralaria_ID = p.Porralaria_ID '
+                    'GROUP BY e.Txapelketa_ID, e.Ezizen_ID '
                     'ORDER BY e.Txapelketa_ID, e.Posizioa'))
             if path == "/api/karrera-sailkapena":
                 return self.send_json(rows(con,
@@ -1259,14 +1426,13 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return self.send_json({"karrera": dict(karrera), "sailkapena": sailkapena})
             if path == "/api/ezizenak":
-                return self.send_json(rows(con,
-                    'SELECT ez.Ezizen_ID, ez.Ezizena, ez.Txapelketa_ID, '
-                    't.Izena AS Txapelketa, ep.Porralaria_ID, p.Izena AS Porralaria '
-                    'FROM "PorralariEzizenak" ez '
-                    'LEFT JOIN "Txapelketak" t ON ez.Txapelketa_ID = t.Txapelketa_ID '
-                    'LEFT JOIN "EzizenPorralariak" ep ON ez.Ezizen_ID = ep.Ezizen_ID '
-                    'LEFT JOIN "Porralariak" p ON ep.Porralaria_ID = p.Porralaria_ID '
-                    'ORDER BY t.Urtea DESC, ez.Ezizena'))
+                return self.send_json(api_ezizenak(con))
+            if path == "/api/porralaria-ezizenak":
+                params = parse_qs(parsed.query)
+                pid = params.get("porralaria_id", [None])[0]
+                if not pid:
+                    return self.send_error_json("porralaria_id parametroa behar da", 400)
+                return self.send_json(_porralaria_ezizenak(con, int(pid)))
             if path == "/api/meta":
                 return self.send_json(db_meta())
             if path == "/api/undo-state":
@@ -1324,31 +1490,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(do_redo())
 
         elif path == "/api/ezizen-lotu":
-            # Ezizen bat porralari bati lotu EzizenPorralariak taulan
-            ezizen_id  = data.get("ezizen_id")
-            porralaria_id = data.get("porralaria_id")
-            if not ezizen_id or not porralaria_id:
-                return self.send_error_json("ezizen_id eta porralaria_id behar dira")
-            try:
-                with get_db() as con:
-                    # Begiratu jada ba ote dagoen
-                    existing = con.execute(
-                        'SELECT * FROM "EzizenPorralariak" WHERE Ezizen_ID = ?', [ezizen_id]
-                    ).fetchone()
-                    if existing:
-                        con.execute(
-                            'UPDATE "EzizenPorralariak" SET Porralaria_ID = ? WHERE Ezizen_ID = ?',
-                            [porralaria_id, ezizen_id]
-                        )
-                    else:
-                        con.execute(
-                            'INSERT INTO "EzizenPorralariak" (Ezizen_ID, Porralaria_ID) VALUES (?, ?)',
-                            [ezizen_id, porralaria_id]
-                        )
-                    con.commit()
-                return self.send_json({"ok": True})
-            except Exception as e:
-                return self.send_error_json(str(e))
+            # Ezizen bati porralari bat EDO anitz esleitu (talde-porra).
+            # Multzo osoa ordezkatzen du: porralaria_ids = behin betiko zerrenda.
+            return self.send_json(ezizen_lotu(data))
+
+        elif path == "/api/porralari-split":
+            return self.send_json(porralari_split(data))
 
         elif path == "/api/merge/preview":
             kind    = data.get("kind", "")

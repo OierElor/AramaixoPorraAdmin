@@ -112,6 +112,9 @@
     .merge-name{font-size:15px;font-weight:600;}
     .merge-name.keep{color:#4ade80;}
     .merge-name.drop{color:var(--accent);}
+    .ezizen-chip{display:inline-flex;align-items:center;gap:5px;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.35);color:#4ade80;border-radius:14px;padding:2px 9px;font-size:12px;font-weight:600;}
+    .ezizen-chip .chip-x{cursor:pointer;color:var(--muted);font-weight:700;}
+    .ezizen-chip .chip-x:hover{color:var(--accent);}
     .karrera-item{padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .1s;}
     .karrera-item:last-child{border-bottom:none;}
     .karrera-item:hover{background:rgba(255,255,255,.04);}
@@ -149,6 +152,7 @@
     <div class="nav-item" data-section="merge"><span class="icon">🔀</span> Fusionatu</div>
     
     <div class="nav-item" data-section="ezizenak"><span class="icon">🏷️</span> Ezizenak lotu</div>
+    <div class="nav-item" data-section="banatu"><span class="icon">✂️</span> Banatu porralaria</div>
   </nav>
   <main class="main">
 
@@ -293,7 +297,7 @@ Tour De France,2026</pre></div>
 
     <!-- EZIZENAK LOTU -->
     <section class="section" id="sec-ezizenak">
-      <div class="page-header"><div><div class="page-title">🏷️ Ezizenak lotu</div><div class="page-sub">Ezizen bakoitza porralari bati esleitu</div></div></div>
+      <div class="page-header"><div><div class="page-title">🏷️ Ezizenak lotu</div><div class="page-sub">Ezizen bakoitza porralari bati edo gehiagori esleitu (talde-porra)</div></div></div>
       <div class="card">
         <div class="toolbar">
           <input class="search-input" id="ezizen-search" placeholder="Bilatu ezizena edo txapelketa..."/>
@@ -301,16 +305,33 @@ Tour De France,2026</pre></div>
             <option value="">Guztiak</option>
             <option value="lotu-gabe">Lotu gabekoak</option>
             <option value="lotuta">Lotutakoak</option>
+            <option value="taldea">Talde-porrak (2+)</option>
           </select>
           <span style="color:var(--muted);font-size:12px" id="ezizen-count"></span>
         </div>
         <div class="tbl-wrap"><table>
-          <thead><tr><th>Ezizena</th><th>Txapelketa</th><th>Porralaria</th><th style="width:200px">Esleitu</th></tr></thead>
+          <thead><tr><th>Ezizena</th><th>Txapelketa</th><th>Porralaria(k)</th><th style="width:260px">Esleitu</th></tr></thead>
           <tbody id="ezizen-tbody"></tbody>
         </table></div>
       </div>
     </section>
 
+
+    <!-- BANATU PORRALARIA -->
+    <section class="section" id="sec-banatu">
+      <div class="page-header"><div><div class="page-title">✂️ Banatu porralaria</div><div class="page-sub">Porralari baten porrak (ezizenak) bi pertsonen artean banatu</div></div></div>
+      <div class="card">
+        <div class="card-body">
+          <div class="field">
+            <label>Banatu beharreko porralaria</label>
+            <select id="banatu-src" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 12px;color:var(--text);font-size:13px;outline:none">
+              <option value="">— Hautatu porralaria —</option>
+            </select>
+          </div>
+          <div id="banatu-ezizenak-wrap" style="margin-top:14px"></div>
+        </div>
+      </div>
+    </section>
 
     <!-- FUSIONATU -->
     <section class="section" id="sec-merge">
@@ -374,9 +395,24 @@ function setSection(id) {
   const sec = el("sec-" + id);
   if (sec) sec.classList.add("active");
   document.querySelector(`.nav-item[data-section="${id}"]`)?.classList.add("active");
-  if (id === "merge") renderMergeSection();
-  if (id === "ezizenak") loadEzizenak();
-  if (id === "karrera-emaitzak") { renderRaceTxapSel(); renderKarreraList(); }
+  renderCurrentSection();
+}
+
+// Uneko atala BAKARRIK marraztu (ez denak), izozketak saihesteko.
+function renderCurrentSection() {
+  const active = (document.querySelector(".section.active")?.id || "").replace("sec-", "");
+  switch (active) {
+    case "dashboard":        renderDashRanking(el("dash-txap-sel")?.value); break;
+    case "porralariak":      renderPorralariak(); break;
+    case "txirrindulariak":  renderTxirrindulariak(); break;
+    case "txapelketak":      renderTxapelketak(); break;
+    case "sailkapenak":      renderSailkapena(); break;
+    case "karrera-emaitzak": renderRaceTxapSel(); renderKarreraList(); break;
+    case "taulak":           if (state.currentTable) loadGenericTable(state.currentTable); break;
+    case "merge":            renderMergeSection(); break;
+    case "ezizenak":         loadEzizenak(); break;
+    case "banatu":           renderBanatuSection(); break;
+  }
 }
 
 document.querySelectorAll(".nav-item[data-section]").forEach(item => {
@@ -399,13 +435,13 @@ async function reloadData() {
   state.txapelketak = txap; state.karrerak = kar;
   state.txirriEmaitzak = txirriE; state.porraEmaitzak = porraE;
   state.karreraSailkapena = karE;
+  state._porrOpts = null;  // porralari-aukeren cache baliogabetu
 
-  renderStats(); renderPorralariak(); renderTxirrindulariak();
-  renderTxapelketak(); renderDashTxapSel(); renderManualSelects();
-  renderSailTxapSel(); renderSailkapena(); renderUndoList(undoSt);
-  if (state.currentTable) loadGenericTable(state.currentTable);
-  if (el("sec-merge")?.classList.contains("active")) renderMergeSection();
-  if (el("sec-ezizenak")?.classList.contains("active")) renderEzizenak();
+  // Beti: arinak diren elementuak (estatistikak, hautagailuak)
+  renderStats(); renderDashTxapSel(); renderManualSelects();
+  renderSailTxapSel(); renderRaceTxapSel(); renderUndoList(undoSt);
+  // Astuna den taula-marrazketa: uneko atalerako bakarrik
+  renderCurrentSection();
 }
 
 // ── Stats ────────────────────────────────────────────────────────────────────
@@ -507,13 +543,14 @@ function renderSailkapena() {
 
 // ── Generic table ─────────────────────────────────────────────────────────────
 async function loadGenericTable(tableName) {
+  // EZ deitu setSection hemen: renderCurrentSection("taulak")-ek funtzio hau deitzen du,
+  // eta setSection-ek berriz renderCurrentSection → begizta infinitua sortuko luke.
   state.currentTable = tableName;
   el("generic-table-title").textContent = tableName;
   try {
     const data = await api("/api/table/" + encodeURIComponent(tableName));
     state.currentTableData = data;
     renderGenericTable();
-    setSection("taulak");
   } catch(e) { showToast(e.message, "err"); }
 }
 function renderGenericTable() {
@@ -576,6 +613,9 @@ async function buildTableNav() {
       item.addEventListener("click", () => {
         document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
         item.classList.add("active");
+        // Atala eskuz aktibatu (setSection erabili gabe, sub-itemaren nabarmentzea galdu ez dadin)
+        document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+        el("sec-taulak")?.classList.add("active");
         loadGenericTable(item.dataset.table);
       });
     });
@@ -1067,43 +1107,171 @@ function renderEzizenak() {
   const q      = (el("ezizen-search")?.value || "").toLowerCase();
   const filter = el("ezizen-filter")?.value || "";
   let filtered = data.filter(r => {
+    const lotuta = (r.Porralariak||[]).length > 0;
     if (q && !(r.Ezizena||"").toLowerCase().includes(q) && !(r.Txapelketa||"").toLowerCase().includes(q)) return false;
-    if (filter === "lotu-gabe" && r.Porralaria_ID) return false;
-    if (filter === "lotuta"    && !r.Porralaria_ID) return false;
+    if (filter === "lotu-gabe" && lotuta) return false;
+    if (filter === "lotuta"    && !lotuta) return false;
+    if (filter === "taldea"    && (r.Porralariak||[]).length < 2) return false;
     return true;
   });
   el("ezizen-count").textContent = filtered.length + " ezizen";
-  const porrOpts = (state.porralariak || [])
-    .map(p => `<option value="${p.Porralaria_ID}">${esc(p.Izena)}</option>`).join("");
   el("ezizen-tbody").innerHTML = filtered.map(r => {
-    const lotuBadge = r.Porralaria_ID
-      ? `<span style="color:#4ade80;font-weight:600">${esc(r.Porralaria)}</span>`
+    const pls = r.Porralariak || [];
+    const chips = pls.length
+      ? pls.map(p => `<span class="ezizen-chip">${esc(p.Izena)}<span class="chip-x" title="Kendu" onclick="ezizenKendu(${r.Ezizen_ID},${p.Porralaria_ID})">✕</span></span>`).join("")
+        + (pls.length>1 ? `<span class="badge" style="background:#7c3aed;color:#fff" title="Talde-porra">👥 taldea</span>` : "")
       : `<span style="color:var(--muted);font-size:12px">Lotu gabe</span>`;
     return `<tr>
       <td style="font-weight:600">${esc(r.Ezizena)}</td>
       <td style="color:var(--muted);font-size:12px">${esc(r.Txapelketa||"")}</td>
-      <td>${lotuBadge}</td>
+      <td><div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">${chips}</div></td>
       <td><div style="display:flex;gap:6px;align-items:center">
-        <select id="porra-sel-${r.Ezizen_ID}" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none">
-          <option value="">— Hautatu —</option>${porrOpts}
+        <select id="porra-sel-${r.Ezizen_ID}" data-filled="0" onmousedown="fillPorraSel(this)" onfocus="fillPorraSel(this)" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none">
+          <option value="">— Hautatu —</option>
         </select>
-        <button class="btn btn-sm btn-primary" onclick="lotuegin(${r.Ezizen_ID})">Lotu</button>
+        <button class="btn btn-sm btn-primary" title="Gehitu porralaria (talde-porra egiteko hainbat gehi daitezke)" onclick="ezizenGehitu(${r.Ezizen_ID})">+ Gehitu</button>
+        <button class="btn btn-sm btn-ghost" title="Porralari berri bat sortu eta lotu" onclick="ezizenGehituBerria(${r.Ezizen_ID})">+ Berria</button>
       </div></td>
     </tr>`;
   }).join("") || `<tr><td colspan="4" style="color:var(--muted);padding:24px;text-align:center">Ez dago emaitzarik</td></tr>`;
-  filtered.forEach(r => {
-    if (r.Porralaria_ID) { const s = el("porra-sel-"+r.Ezizen_ID); if(s) s.value=r.Porralaria_ID; }
-  });
 }
 
-async function lotuegin(ezizen_id) {
-  const sel = el("porra-sel-" + ezizen_id);
-  const porralaria_id = sel?.value;
-  if (!porralaria_id) return showToast("Porralaria bat hautatu", "err");
+function _ezizenCurrentIds(ezizen_id) {
+  const r = (state.ezizenak||[]).find(x => x.Ezizen_ID === ezizen_id);
+  return (r?.Porralariak || []).map(p => p.Porralaria_ID);
+}
+
+// Porralari-aukerak behin sortu eta cache-an gorde (errenkada bakoitzean ez sortzeko).
+function porraOptionsHTML() {
+  if (!state._porrOpts) {
+    state._porrOpts = (state.porralariak || [])
+      .map(p => `<option value="${p.Porralaria_ID}">${esc(p.Izena)}</option>`).join("");
+  }
+  return state._porrOpts;
+}
+// Select-a fokuan/klikatzean bakarrik bete (485.000 aukera-nodo aldez aurretik ez marrazteko).
+function fillPorraSel(sel) {
+  if (!sel || sel.dataset.filled === "1") return;
+  sel.insertAdjacentHTML("beforeend", porraOptionsHTML());
+  sel.dataset.filled = "1";
+}
+
+// Ezizenen atala BAKARRIK birkargatu (errekarga osoa baino askoz arinago).
+async function reloadEzizenakOnly() {
   try {
-    await api("/api/ezizen-lotu", { method:"POST", body: JSON.stringify({ ezizen_id: Number(ezizen_id), porralaria_id: Number(porralaria_id) }) });
-    showToast("✅ Ezizena lotuta");
-    await loadEzizenak();
+    const [po, pe, ez] = await Promise.all([
+      api("/api/porralariak"), api("/api/porralari-emaitzak"), api("/api/ezizenak"),
+    ]);
+    state.porralariak = po; state.porraEmaitzak = pe; state.ezizenak = ez;
+    state._porrOpts = null;           // porralari-aukeren cache baliogabetu
+    renderStats();
+    renderEzizenak();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+async function _ezizenPost(ezizen_id, body) {
+  try {
+    const r = await api("/api/ezizen-lotu", { method:"POST", body: JSON.stringify({ ezizen_id: Number(ezizen_id), ...body }) });
+    if (r && r.ok === false) return showToast(r.reason || "Errorea", "err");
+    showToast("✅ Eguneratuta");
+    await reloadEzizenakOnly();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+function ezizenGehitu(ezizen_id) {
+  const sel = el("porra-sel-" + ezizen_id);
+  const pid = sel?.value;
+  if (!pid) return showToast("Porralaria bat hautatu", "err");
+  const ids = _ezizenCurrentIds(ezizen_id);
+  if (ids.includes(Number(pid))) return showToast("Jada lotuta dago", "err");
+  ids.push(Number(pid));
+  _ezizenPost(ezizen_id, { porralaria_ids: ids });
+}
+
+function ezizenGehituBerria(ezizen_id) {
+  const izena = (prompt("Porralari berriaren izena:") || "").trim();
+  if (!izena) return;
+  _ezizenPost(ezizen_id, { porralaria_ids: _ezizenCurrentIds(ezizen_id), new_porralariak: [izena] });
+}
+
+function ezizenKendu(ezizen_id, porralaria_id) {
+  const ids = _ezizenCurrentIds(ezizen_id).filter(x => x !== porralaria_id);
+  _ezizenPost(ezizen_id, { porralaria_ids: ids });
+}
+
+// ── Banatu porralaria ─────────────────────────────────────────────────────────
+function renderBanatuSection() {
+  const sel = el("banatu-src");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = `<option value="">— Hautatu porralaria —</option>` +
+    (state.porralariak||[]).map(p => `<option value="${p.Porralaria_ID}">${esc(p.Izena)} (${p["Zenbat Porra"] ?? "—"} porra)</option>`).join("");
+  if (prev) sel.value = prev;
+  if (sel.value) loadBanatuEzizenak();
+  else el("banatu-ezizenak-wrap").innerHTML = `<div style="color:var(--muted);font-size:13px;padding:8px">Hautatu porralari bat bere porrak ikusteko.</div>`;
+}
+
+async function loadBanatuEzizenak() {
+  const srcId = el("banatu-src")?.value;
+  const wrap = el("banatu-ezizenak-wrap");
+  if (!srcId) { wrap.innerHTML=""; return; }
+  wrap.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:8px">Kargatzen...</div>`;
+  try {
+    const ez = await api("/api/porralaria-ezizenak?porralaria_id=" + srcId);
+    if (!ez.length) { wrap.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:8px">Porralari honek ez du porrarik (ezizenik) lotuta.</div>`; return; }
+    const otherOpts = (state.porralariak||[])
+      .filter(p => String(p.Porralaria_ID) !== String(srcId))
+      .map(p => `<option value="${p.Porralaria_ID}">${esc(p.Izena)}</option>`).join("");
+    const rows = ez.map(e => `<label style="display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;cursor:pointer">
+        <input type="checkbox" class="banatu-ez-chk" value="${e.Ezizen_ID}">
+        <span style="font-weight:600">${esc(e.Ezizena)}</span>
+        <span style="color:var(--muted);font-size:12px">— ${esc(e.Txapelketa||"")}</span>
+      </label>`).join("");
+    wrap.innerHTML = `
+      <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Aukeratu zein porra (ezizen) pasatu beste porralari bati:</div>
+      ${rows}
+      <div style="display:flex;gap:8px;margin:6px 0 12px"><button class="btn btn-sm btn-ghost" onclick="banatuSelectAll(true)">Denak</button><button class="btn btn-sm btn-ghost" onclick="banatuSelectAll(false)">Bat ere ez</button></div>
+      <div class="card" style="background:var(--bg)"><div class="card-body">
+        <div style="font-weight:600;margin-bottom:8px;font-size:13px">Nori esleitu aukeratutakoak?</div>
+        <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="radio" name="banatu-target-mode" value="new" checked onchange="banatuToggleTarget()"> Porralari berria</label>
+        <input id="banatu-new-izena" placeholder="Porralari berriaren izena" style="width:100%;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:7px 10px;color:var(--text);font-size:13px;margin-bottom:12px"/>
+        <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="radio" name="banatu-target-mode" value="existing" onchange="banatuToggleTarget()"> Lehendik dagoen porralaria</label>
+        <select id="banatu-existing" disabled style="width:100%;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:7px 10px;color:var(--text);font-size:13px"><option value="">— Hautatu —</option>${otherOpts}</select>
+      </div></div>
+      <div style="margin-top:12px"><button class="btn btn-primary" onclick="doBanatu()">✂️ Banatu</button></div>`;
+  } catch(e) { wrap.innerHTML = `<div style="color:var(--accent);padding:8px">${esc(e.message)}</div>`; }
+}
+
+function banatuSelectAll(v) {
+  document.querySelectorAll(".banatu-ez-chk").forEach(c => c.checked = v);
+}
+function banatuToggleTarget() {
+  const mode = document.querySelector('input[name="banatu-target-mode"]:checked')?.value;
+  el("banatu-new-izena").disabled = mode !== "new";
+  el("banatu-existing").disabled = mode !== "existing";
+}
+
+async function doBanatu() {
+  const srcId = el("banatu-src")?.value;
+  const ezizen_ids = [...document.querySelectorAll(".banatu-ez-chk:checked")].map(c => Number(c.value));
+  if (!srcId) return showToast("Porralaria hautatu", "err");
+  if (!ezizen_ids.length) return showToast("Gutxienez porra bat aukeratu", "err");
+  const mode = document.querySelector('input[name="banatu-target-mode"]:checked')?.value;
+  const body = { source_id: Number(srcId), ezizen_ids };
+  if (mode === "new") {
+    const izena = (el("banatu-new-izena")?.value || "").trim();
+    if (!izena) return showToast("Porralari berriaren izena idatzi", "err");
+    body.new_izena = izena;
+  } else {
+    const tid = el("banatu-existing")?.value;
+    if (!tid) return showToast("Helburu porralaria hautatu", "err");
+    body.target_id = Number(tid);
+  }
+  try {
+    const r = await api("/api/porralari-split", { method:"POST", body: JSON.stringify(body) });
+    if (!r.ok) return showToast(r.reason || "Errorea", "err");
+    showToast(`✅ ${r.moved} porra "${r.target_izena}"-(r)i esleituta`);
+    await reloadData();
   } catch(e) { showToast(e.message, "err"); }
 }
 
@@ -1153,6 +1321,15 @@ function renderMergePreview(r, kind) {
     : `<p style="color:var(--muted);font-size:13px">Ez dago erreferentziarik migratzeko</p>`;
   const porraLine = r.zenbat_porra_merged!==undefined
     ? `<p style="margin-top:8px;font-size:13px;color:var(--muted)">🏅 <strong>"Zenbat Porra"</strong>: <strong>${r.zenbat_porra_merged}</strong></p>` : "";
+  const ezizenList = (arr) => (arr&&arr.length)
+    ? `<ul style="margin:6px 0 0;padding-left:18px;font-size:12px;color:var(--text)">${arr.map(e=>`<li>${esc(e.Ezizena)} <span style="color:var(--muted)">— ${esc(e.Txapelketa||"")}</span></li>`).join("")}</ul>`
+    : `<div style="font-size:12px;color:var(--muted);margin-top:6px">Ezizenik gabe</div>`;
+  const ezizenakBox = (kind==="porralariak")
+    ? `<div class="merge-box" style="margin-top:-4px">
+         <div><div class="merge-side-label">✅ KEEP ezizenak (${(r.keep.ezizenak||[]).length})</div>${ezizenList(r.keep.ezizenak)}</div>
+         <div></div>
+         <div><div class="merge-side-label">❌ DROP ezizenak (${(r.dropped.ezizenak||[]).length}) → KEEP-era</div>${ezizenList(r.dropped.ezizenak)}</div>
+       </div>` : "";
   wrap.innerHTML=`
     <div class="csv-step-card" style="margin-top:14px">
       <div class="step-label"><span class="step-num">✓</span> Fusioaren aurreikuspen</div>
@@ -1161,6 +1338,7 @@ function renderMergePreview(r, kind) {
         <div style="font-size:24px;color:var(--muted)">←</div>
         <div><div class="merge-side-label">❌ DROP</div><div class="merge-name drop">${esc(r.dropped.izena)}</div><div style="font-size:12px;color:var(--muted)">ID: ${r.dropped.id}</div></div>
       </div>
+      ${ezizenakBox}
       <div style="margin-bottom:12px">${refsHtml}</div>
       ${porraLine}
       <div style="margin-top:12px;padding:10px 12px;background:rgba(230,57,70,.08);border:1px solid rgba(230,57,70,.3);border-radius:7px;font-size:12px;color:var(--accent)">
@@ -1325,6 +1503,7 @@ async function init() {
   el("csv-type")?.addEventListener("change", renderCSVSteps);
   el("ezizen-search")?.addEventListener("input", renderEzizenak);
   el("ezizen-filter")?.addEventListener("change", renderEzizenak);
+  el("banatu-src")?.addEventListener("change", loadBanatuEzizenak);
   el("race-txap-sel")?.addEventListener("change", renderKarreraList);
   document.querySelectorAll(".tab[data-sltab]").forEach(t => {
     t.addEventListener("click", ()=>{
