@@ -283,14 +283,30 @@
           </div></div>
         </div>
         <div class="card"><div class="card-head"><div class="card-title">CSV formatua</div></div><div class="card-body" style="display:flex;flex-direction:column;gap:16px">
+          <div style="font-size:12px;color:var(--muted);line-height:1.5">
+            <strong style="color:var(--text)">.ods-etik:</strong> LibreOffice-n nahi duzun <strong>blokea hautatu eta kopiatu</strong> (edo orria CSV gisa gorde). Mugatzailea (<code>,</code> <code>;</code> tab) automatikoki antzematen da, eta hasierako lerro/zutabe hutsak baztertzen dira. Zutabe-izenak <strong>sinonimoekin</strong> lotzen dira (ez dute zehatzak izan behar).
+          </div>
           <div><div style="font-size:12px;font-weight:600;color:var(--accent);margin-bottom:6px;text-transform:uppercase">Porralariak / Txirrindulariak</div><pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;overflow-x:auto">Izena
 Petit Breton
 Vingegaard Jonas</pre></div>
-          <div><div style="font-size:12px;font-weight:600;color:var(--accent2);margin-bottom:6px;text-transform:uppercase">Txapelketak / Karrerak</div><pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;overflow-x:auto">Izena,Urtea
+          <div><div style="font-size:12px;font-weight:600;color:var(--accent2);margin-bottom:6px;text-transform:uppercase">Txapelketak / Karrerak (Etapak)</div><pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;overflow-x:auto">Izena,Urtea
 Tour De France,2026</pre></div>
-          <div><div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase">Txirrindulari sailkapena</div><pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;overflow-x:auto">Posizioa,Txirrindularia,Puntuak
-1,Pogacar Tadej,382
-2,Vingegaard Jonas,242</pre></div>
+          <div><div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase">Karreren emaitzak — "Txirrindulari emaitzak (karrera)"</div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Klasikak → <em>Sailkapenak erakutsi</em> orriko lasterketa-blokea. Karrera aukeratu behar da lehenik.</div>
+            <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;overflow-x:auto">Sailkapena,Dortsala,Izena,Puntuak,Zenbatek
+1,0102,PHILIPSEN Jasper,400,37
+2,0309,ANDRESEN Tobias,320,1</pre>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px">Behar: <strong>Sailkapena</strong> (edo Posizioa), <strong>Izena</strong> (edo Txirrindularia), <strong>Puntuak</strong>. Dortsala/Zenbatek baztertu egiten dira.</div></div>
+          <div><div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase">Txirrindulari sailkapena (txapelketa)</div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Klasikak → <em>Txirrindulari Sailkapena</em> blokea · Grand tour → <em>Txirrindulariak</em> orriko azken sailkapena.</div>
+            <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;overflow-x:auto">Posizioa,Zbkia,Txirrindularia,Zenbatek,Puntuak
+1,1601,POGAČAR Tadej,39,3540
+2,1501,VAN AERT Wout,38,2165</pre></div>
+          <div><div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase">Porralari sailkapena (txapelketa)</div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Klasikak → <em>Sailkapen nagusia</em> blokea · Grand tour → <em>Porralariak</em> orriko sailkapena. <strong>Porreroa</strong> = ezizena.</div>
+            <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;overflow-x:auto">Posizioa,Porreroa,Puntuak
+1,Keops,21209
+2,La Diva,20457</pre></div>
         </div></div>
       </div>
     </section>
@@ -640,22 +656,34 @@ async function manualAdd(payload) {
 let csvRows = [], csvHeaders = [];
 
 function parseCSV(text) {
-  const lines = text.trim().split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { headers: [], rows: [] };
+  let lines = text.replace(/^﻿/, "").split(/\r?\n/);
+  // Mugatzailea auto-detektatu (LibreOffice askotan ';' edo tab erabiltzen du)
+  const sample = lines.find(l => l.trim()) || "";
+  const counts = { ",": (sample.match(/,/g)||[]).length,
+                   ";": (sample.match(/;/g)||[]).length,
+                   "\t": (sample.match(/\t/g)||[]).length };
+  const delim = Object.keys(counts).reduce((a,b) => counts[b] > counts[a] ? b : a, ",");
   const parseRow = line => {
     const cols = []; let cur = "", inQ = false;
     for (const ch of line) {
       if (ch === '"') { inQ = !inQ; }
-      else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ""; }
+      else if (ch === delim && !inQ) { cols.push(cur.trim()); cur = ""; }
       else cur += ch;
     }
     cols.push(cur.trim()); return cols;
   };
-  const headers = parseRow(lines[0]);
-  const rows = lines.slice(1).map(l => {
-    const vals = parseRow(l);
-    return Object.fromEntries(headers.map((h,i) => [h, vals[i] ?? ""]));
-  });
+  // Goiburua: lehen lerroa zelda ez-huts batekin (titulu/lerro huts hasierakoak saltatu)
+  const allRows = lines.map(parseRow);
+  let hi = 0;
+  while (hi < allRows.length && allRows[hi].every(c => c === "")) hi++;
+  if (hi >= allRows.length) return { headers: [], rows: [] };
+  let headers = allRows[hi];
+  // Goiburu hutsa duten zutabeak baztertu (kopiatzean sortzen den hasierako zutabe hutsa, adib.)
+  const keep = headers.map((h,i) => h !== "" ? i : -1).filter(i => i >= 0);
+  headers = keep.map(i => allRows[hi][i]);
+  const rows = allRows.slice(hi + 1)
+    .filter(vals => vals.some(c => c !== ""))   // erabat hutsik dauden lerroak saltatu
+    .map(vals => Object.fromEntries(keep.map(i => [allRows[hi][i], vals[i] ?? ""])));
   return { headers, rows };
 }
 

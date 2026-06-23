@@ -69,30 +69,32 @@ CSV_PROFILES = {
     "karrera_txirrindulari_emaitzak": {
         "label": "Txirrindulari emaitzak (karrera)",
         "target": "KarreraSailkapena",
-        "fields": ["Txirrindularia", "Puntuak", "Dortsala"],
+        "fields": ["Sailkapena", "Txirrindularia", "Puntuak"],
         "context_fields": ["Karrera_ID"],
-        "required": ["Karrera_ID", "Txirrindularia", "Puntuak", "Dortsala"],
+        "required": ["Karrera_ID", "Txirrindularia", "Puntuak", "Sailkapena"],
         "identity": ["Karrera_ID", "Txirrindularia_ID"],
     },
 }
 
 FIELD_ALIASES = {
     "Txapelketa_ID": ["Txapelketa_ID", "Txapelketa", "Competition", "Competition_ID"],
-    "Karrera_ID": ["Karrera_ID", "Karrerak_ID", "Karrera", "Race", "Race_ID"],
+    "Karrera_ID": ["Karrera_ID", "Karrerak_ID", "Karrera", "Lasterketa", "Race", "Race_ID"],
     "Karrerak_ID": ["Karrerak_ID", "Karrera_ID"],
-    "Ezizena": ["Ezizena", "Porralaria", "Porralari", "Nickname"],
+    "Ezizena": ["Ezizena", "Porreroa", "Porrero", "Porralaria", "Porralari", "Nickname", "Taldea"],
     "Txirrindularia": ["Txirrindularia", "Txirrindulari", "Izena", "Rider", "Cyclist", "Name", "Nombre"],
-    "Porralaria": ["Porralaria", "Ezizena", "Porralari"],
-    "Posizioa": ["Posizioa", "Sailkapena", "Sailkapen", "Postua", "Rank", "Pos", "Position", "#"],
-    "Puntuak": ["Puntuak", "Puntu", "Points", "Pts", "Ptos"],
+    "Porralaria": ["Porralaria", "Porreroa", "Porrero", "Ezizena", "Porralari"],
+    # .ods-etan karreren blokeak "Sailkapena", grand tourretan "Posizioa" edo "Aukeratze Sailkapena"
+    "Sailkapena": ["Sailkapena", "Posizioa", "Sailkapen", "Postua", "Aukeratze Sailkapena", "Rank", "Pos", "Position", "#"],
+    "Posizioa": ["Posizioa", "Sailkapena", "Sailkapen", "Postua", "Aukeratze Sailkapena", "Rank", "Pos", "Position", "#"],
+    "Puntuak": ["Puntuak", "Guztira", "Puntu", "Points", "Pts", "Ptos"],
     "Urtea": ["Urtea", "Year", "Año"],
-    "Izena": ["Izena", "Name", "Title", "Nombre"],
-    "Dortsala": ["Dortsala", "Dorsala", "Bib", "Dorsal", "Dors"],
-    "Puntuak_Sailkapen_Nag": ["Puntuak_Sailkapen_Nag", "Puntuak_SailkapenNag", "Sailkapen_Nagusia", "SailkapenNagusia", "Sailkapen Nagusia", "Nagusia", "GC", "General"],
-    "Puntuak_Mendian": ["Puntuak_Mendian", "Mendian", "Mendi", "Mountain", "KOM"],
-    "Zenbatek": ["Zenbatek", "Zenbatek?", "Zenbat", "Count", "Kopurua", "Aukeratu"],
-    "Puntuak_Mendikoa": ["Puntuak_Mendikoa", "Mendikoa", "Mendian", "Mendi", "Mountain", "KOM"],
-    "Puntuak_Generala": ["Puntuak_Generala", "Generala", "General", "GC", "Sailkapen Nagusia", "Nagusia"],
+    "Izena": ["Izena", "Name", "Title", "Nombre", "Helmuga"],
+    "Dortsala": ["Dortsala", "Dorsala", "Dorsalak", "Zbkia", "Zenbakia", "Bib", "Dorsal", "Dors"],
+    "Puntuak_Sailkapen_Nag": ["Puntuak_Sailkapen_Nag", "Puntuak_SailkapenNag", "Sailkapen_Nagusia", "SailkapenNagusia", "Sailkapen Nagusia", "Nagusia", "Orokorra", "orokorra", "GC", "General"],
+    "Puntuak_Mendian": ["Puntuak_Mendian", "Mendian", "Mendia", "Mendi", "Mountain", "KOM"],
+    "Zenbatek": ["Zenbatek", "Zenbatek?", "Zenbatek Daukate?", "Zenbat", "Count", "Kopurua", "Aukeratu"],
+    "Puntuak_Mendikoa": ["Puntuak_Mendikoa", "Mendikoa", "Mendian", "Mendia", "Mendi", "Mountain", "KOM"],
+    "Puntuak_Generala": ["Puntuak_Generala", "Generala", "Orokorra", "orokorra", "General", "GC", "Sailkapen Nagusia", "Nagusia"],
 }
 
 # ─── DB helpers ───────────────────────────────────────────────────────────────
@@ -153,12 +155,15 @@ def _first_match(raw: dict, names: list[str]):
         for key, value in raw.items():
             if str(key).strip().lower() == wanted.strip().lower():
                 return value if value != "" else None
-    # Bigarren pasada: partzial match (key-ak wanted-a dauka)
+    # Bigarren pasada: partzial match — aliasa zutabe-izenaren AZPIKATE bada soilik.
+    # (EZ alderantziz: bestela "Puntuak" zutabeak "Puntuak_Mendikoa" eremua faltsuki beteko luke.)
     for wanted in names:
+        w = wanted.strip().lower()
+        if len(w) < 3:
+            continue
         for key, value in raw.items():
             k = str(key).strip().lower()
-            w = wanted.strip().lower()
-            if w in k or k in w:
+            if w in k:
                 return value if value != "" else None
     return None
 
@@ -569,10 +574,10 @@ def _normalize_row(profile_id, mapping, raw, context=None, con=None, create_miss
         karrera_id = _to_int(get("Karrera_ID"))
         txirr_name = get("Txirrindularia")
         puntuak = _to_int(get("Puntuak"))
-        dortsala = _to_int(get("Dortsala"))
-        if karrera_id is None or not txirr_name or puntuak is None or dortsala is None:
+        sailkapena = _to_int(get("Sailkapena"))
+        if karrera_id is None or not txirr_name or puntuak is None or sailkapena is None:
             return None
-        norm = {"Karrera_ID": karrera_id, "Txirrindularia": txirr_name, "Puntuak": puntuak, "Dortsala": dortsala}
+        norm = {"Karrera_ID": karrera_id, "Txirrindularia": txirr_name, "Puntuak": puntuak, "Sailkapena": sailkapena}
         if con is not None:
             rider_id = _find_txirrindularia_id(con, txirr_name)
             if rider_id is not None:
@@ -656,8 +661,8 @@ def _insert_row(con, profile_id, norm):
         return {"Txapelketa_ID": norm["Txapelketa_ID"], "Ezizen_ID": int(ezizen_id)}
     if profile_id == "karrera_txirrindulari_emaitzak":
         rider_id = norm.get("Txirrindularia_ID") or _ensure_txirrindularia_id(con, norm["Txirrindularia"])
-        con.execute('INSERT INTO "KarreraSailkapena" (Karrera_ID, Txirrindularia_ID, Puntuak, Dortsala) VALUES (?, ?, ?, ?)',
-            [norm["Karrera_ID"], int(rider_id), norm["Puntuak"], norm["Dortsala"]])
+        con.execute('INSERT INTO "KarreraSailkapena" (Karrera_ID, Txirrindularia_ID, Puntuak, Sailkapena) VALUES (?, ?, ?, ?)',
+            [norm["Karrera_ID"], int(rider_id), norm["Puntuak"], norm["Sailkapena"]])
         return {"Karrera_ID": norm["Karrera_ID"], "Txirrindularia_ID": int(rider_id)}
     raise ValueError(f"Taula ezezaguna: {profile_id}")
 
