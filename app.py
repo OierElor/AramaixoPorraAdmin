@@ -726,6 +726,50 @@ def update_table_row(table_name, payload):
         con.commit()
     return {"ok": True, "updated": cur.rowcount}
 
+# ─── Sariak ───────────────────────────────────────────────────────────────────
+
+def get_sariak(txapelketa_id):
+    with get_db() as con:
+        return rows(con,
+            'SELECT Posizioa, Saria FROM "Sariak" WHERE Txapelketa_ID = ? ORDER BY Posizioa',
+            [txapelketa_id])
+
+def save_sariak(payload):
+    """Txapelketa baten sari guztiak ordezkatu (ezabatu + sartu transakzio batean).
+    payload: { txapelketa_id, sariak: [{Posizioa, Saria}, ...] }"""
+    txap_id = payload.get("txapelketa_id")
+    sariak = payload.get("sariak", [])
+    if not txap_id:
+        return {"ok": False, "reason": "txapelketa_id behar da"}
+    clean = []
+    seen = set()
+    for s in sariak:
+        pos = s.get("Posizioa")
+        saria = (s.get("Saria") or "").strip()
+        if pos in (None, "") or saria == "":
+            continue
+        try:
+            pos = int(pos)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": f"Posizio baliogabea: {pos}"}
+        if pos in seen:
+            return {"ok": False, "reason": f"Posizioa errepikatuta: {pos}"}
+        seen.add(pos)
+        clean.append((pos, saria))
+    try:
+        with get_db() as con:
+            t = con.execute('SELECT 1 FROM "Txapelketak" WHERE Txapelketa_ID = ?', [txap_id]).fetchone()
+            if not t:
+                return {"ok": False, "reason": f"Txapelketa {txap_id} ez da existitzen"}
+            con.execute('DELETE FROM "Sariak" WHERE Txapelketa_ID = ?', [txap_id])
+            for pos, saria in clean:
+                con.execute('INSERT INTO "Sariak" (Txapelketa_ID, Posizioa, Saria) VALUES (?, ?, ?)',
+                            [txap_id, pos, saria])
+            con.commit()
+        return {"ok": True, "count": len(clean)}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
 # ─── CSV Preview / Import ─────────────────────────────────────────────────────
 
 def csv_preview(payload):
@@ -1444,6 +1488,12 @@ class Handler(BaseHTTPRequestHandler):
                     [int(karrera_id)]
                 )
                 return self.send_json({"karrera": dict(karrera), "sailkapena": sailkapena})
+            if path == "/api/sariak":
+                params = parse_qs(parsed.query)
+                tid = params.get("txapelketa_id", [None])[0]
+                if not tid:
+                    return self.send_error_json("txapelketa_id parametroa behar da", 400)
+                return self.send_json(get_sariak(int(tid)))
             if path == "/api/ezizenak":
                 return self.send_json(api_ezizenak(con))
             if path == "/api/porralaria-ezizenak":
@@ -1492,6 +1542,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "id": cur.lastrowid})
             except Exception as e:
                 return self.send_error_json(str(e))
+
+        elif path == "/api/sariak":
+            return self.send_json(save_sariak(data))
 
         elif path == "/api/csv/fuzzy-check":
             return self.send_json(csv_fuzzy_check(data))

@@ -149,6 +149,7 @@
     <div class="nav-section">Sartu</div>
     <div class="nav-item" data-section="add-manual"><span class="icon">✏️</span> Eskuz sartu</div>
     <div class="nav-item" data-section="add-csv"><span class="icon">📂</span> CSV inportatu</div>
+    <div class="nav-item" data-section="sariak"><span class="icon">🏅</span> Sariak</div>
     <div class="nav-item" data-section="merge"><span class="icon">🔀</span> Fusionatu</div>
     
     <div class="nav-item" data-section="ezizenak"><span class="icon">🏷️</span> Ezizenak lotu</div>
@@ -311,6 +312,22 @@ Tour De France,2026</pre></div>
       </div>
     </section>
 
+    <!-- SARIAK -->
+    <section class="section" id="sec-sariak">
+      <div class="page-header"><div><div class="page-title">🏅 Sariak</div><div class="page-sub">Txapelketa bakoitzeko sariak kudeatu (posizioa → saria)</div></div></div>
+      <div class="card" style="max-width:700px">
+        <div class="card-body">
+          <div class="field">
+            <label>Txapelketa</label>
+            <select id="sariak-txap-sel" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 12px;color:var(--text);font-size:13px;outline:none">
+              <option value="">— Hautatu txapelketa —</option>
+            </select>
+          </div>
+          <div id="sariak-editor" style="margin-top:16px"><div style="color:var(--muted);font-size:13px;padding:8px">Hautatu txapelketa bat sariak ikusteko edo gehitzeko.</div></div>
+        </div>
+      </div>
+    </section>
+
     <!-- EZIZENAK LOTU -->
     <section class="section" id="sec-ezizenak">
       <div class="page-header"><div><div class="page-title">🏷️ Ezizenak lotu</div><div class="page-sub">Ezizen bakoitza porralari bati edo gehiagori esleitu (talde-porra)</div></div></div>
@@ -426,6 +443,7 @@ function renderCurrentSection() {
     case "karrera-emaitzak": renderRaceTxapSel(); renderKarreraList(); break;
     case "taulak":           if (state.currentTable) loadGenericTable(state.currentTable); break;
     case "merge":            renderMergeSection(); break;
+    case "sariak":           renderSariakTxapSel(); loadSariak(); break;
     case "ezizenak":         loadEzizenak(); break;
     case "banatu":           renderBanatuSection(); break;
   }
@@ -455,7 +473,7 @@ async function reloadData() {
 
   // Beti: arinak diren elementuak (estatistikak, hautagailuak)
   renderStats(); renderDashTxapSel(); renderManualSelects();
-  renderSailTxapSel(); renderRaceTxapSel(); renderUndoList(undoSt);
+  renderSailTxapSel(); renderRaceTxapSel(); renderSariakTxapSel(); renderUndoList(undoSt);
   // Astuna den taula-marrazketa: uneko atalerako bakarrik
   renderCurrentSection();
 }
@@ -1303,6 +1321,88 @@ async function doBanatu() {
   } catch(e) { showToast(e.message, "err"); }
 }
 
+// ── Sariak ────────────────────────────────────────────────────────────────────
+function renderSariakTxapSel() {
+  const sel = el("sariak-txap-sel");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = `<option value="">— Hautatu txapelketa —</option>` +
+    state.txapelketak.map(t => `<option value="${t.Txapelketa_ID}">${esc(t.Izena)} ${esc(t.Urtea)}</option>`).join("");
+  if (prev) sel.value = prev;
+}
+
+async function loadSariak() {
+  const tid = el("sariak-txap-sel")?.value;
+  const ed = el("sariak-editor");
+  if (!ed) return;
+  if (!tid) { ed.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:8px">Hautatu txapelketa bat sariak ikusteko edo gehitzeko.</div>`; return; }
+  ed.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:8px">Kargatzen...</div>`;
+  try {
+    const data = await api("/api/sariak?txapelketa_id=" + tid);
+    renderSariakEditor(data);
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+function sariRowHtml(pos, saria) {
+  return `<tr class="sari-row">
+    <td style="width:90px"><input class="cell-input sari-pos" type="number" min="1" value="${esc(pos)}" style="min-width:60px;border-color:var(--border)"/></td>
+    <td><input class="cell-input sari-val" value="${esc(saria)}" placeholder="Adib: 500.00 € edo Afaria" style="border-color:var(--border)"/></td>
+    <td class="row-actions"><button class="btn btn-sm btn-ghost" onclick="this.closest('tr').remove()" title="Kendu">🗑</button></td>
+  </tr>`;
+}
+
+function renderSariakEditor(rows) {
+  const ed = el("sariak-editor");
+  if (!ed) return;
+  const body = (rows && rows.length) ? rows.map(r => sariRowHtml(r.Posizioa, r.Saria)).join("") : "";
+  ed.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Posizioa</th><th>Saria</th><th></th></tr></thead>
+      <tbody id="sariak-tbody">${body}</tbody>
+    </table></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+      <button class="btn btn-ghost btn-sm" onclick="addSariRow()">+ Lerro berria</button>
+      <button class="btn btn-ghost btn-sm" onclick="sariakTemplate(true)">Txantiloia: 1-6 + Afaria</button>
+      <button class="btn btn-ghost btn-sm" onclick="sariakTemplate(false)">Txantiloia: 1-6</button>
+    </div>
+    <div style="margin-top:14px"><button class="btn btn-primary" onclick="saveSariak()">💾 Gorde sariak</button></div>`;
+  if (!body) addSariRow();
+}
+
+function addSariRow(pos, saria) {
+  const tb = el("sariak-tbody");
+  if (!tb) return;
+  if (pos === undefined) {
+    const used = [...tb.querySelectorAll(".sari-pos")].map(i => Number(i.value)).filter(n => n);
+    pos = used.length ? Math.max(...used) + 1 : 1;
+  }
+  tb.insertAdjacentHTML("beforeend", sariRowHtml(pos, saria ?? ""));
+}
+
+function sariakTemplate(withAfaria) {
+  const tb = el("sariak-tbody");
+  if (!tb) return;
+  if (tb.children.length && !confirm("Uneko lerroak ordeztu txantiloiarekin?")) return;
+  tb.innerHTML = "";
+  for (let i = 1; i <= 6; i++) addSariRow(i, "");
+  if (withAfaria) addSariRow(7, "Afaria");
+}
+
+async function saveSariak() {
+  const tid = el("sariak-txap-sel")?.value;
+  if (!tid) return showToast("Txapelketa hautatu", "err");
+  const sariak = [...document.querySelectorAll("#sariak-tbody .sari-row")].map(tr => ({
+    Posizioa: Number(tr.querySelector(".sari-pos").value),
+    Saria: tr.querySelector(".sari-val").value.trim(),
+  })).filter(s => s.Posizioa && s.Saria);
+  try {
+    const r = await api("/api/sariak", { method: "POST", body: JSON.stringify({ txapelketa_id: Number(tid), sariak }) });
+    if (!r.ok) return showToast(r.reason || "Errorea", "err");
+    showToast(`✅ ${r.count} sari gordeta`);
+    await loadSariak();
+  } catch(e) { showToast(e.message, "err"); }
+}
+
 // ── Merge ─────────────────────────────────────────────────────────────────────
 function renderMergeSection() {
   const kind   = el("merge-kind")?.value || "txirrindulariak";
@@ -1533,6 +1633,7 @@ async function init() {
   el("ezizen-filter")?.addEventListener("change", renderEzizenak);
   el("banatu-src")?.addEventListener("change", loadBanatuEzizenak);
   el("race-txap-sel")?.addEventListener("change", renderKarreraList);
+  el("sariak-txap-sel")?.addEventListener("change", loadSariak);
   document.querySelectorAll(".tab[data-sltab]").forEach(t => {
     t.addEventListener("click", ()=>{
       document.querySelectorAll(".tab[data-sltab]").forEach(x=>x.classList.remove("active"));
