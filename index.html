@@ -150,6 +150,7 @@
     <div class="nav-item" data-section="add-manual"><span class="icon">✏️</span> Eskuz sartu</div>
     <div class="nav-item" data-section="add-csv"><span class="icon">📂</span> CSV inportatu</div>
     <div class="nav-item" data-section="sariak"><span class="icon">🏅</span> Sariak</div>
+    <div class="nav-item" data-section="kalkulatu"><span class="icon">📊</span> Sailkapenak kalkulatu</div>
     <div class="nav-item" data-section="merge"><span class="icon">🔀</span> Fusionatu</div>
     
     <div class="nav-item" data-section="ezizenak"><span class="icon">🏷️</span> Ezizenak lotu</div>
@@ -328,6 +329,42 @@ Tour De France,2026</pre></div>
       </div>
     </section>
 
+    <!-- SAILKAPENAK KALKULATU -->
+    <section class="section" id="sec-kalkulatu">
+      <div class="page-header"><div><div class="page-title">📊 Sailkapenak kalkulatu</div><div class="page-sub">Karreren emaitzetatik txirrindulari eta porralari sailkapenak sortu</div></div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start">
+        <div class="card">
+          <div class="card-body" style="display:flex;flex-direction:column;gap:14px">
+            <div class="field">
+              <label>Txapelketa</label>
+              <select id="kalk-txap-sel" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 12px;color:var(--text);font-size:13px;outline:none">
+                <option value="">— Hautatu txapelketa —</option>
+              </select>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--bg)">
+              <div style="font-weight:600;font-size:13px;margin-bottom:4px">1️⃣ Txirrindulari sailkapena</div>
+              <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Karreren emaitzak metatuta (aurreko sailkapena + karrera berriak).</div>
+              <button class="btn btn-primary btn-sm" onclick="runCalcTxirri()">🚴 Kalkulatu txirrindulari sailkapena</button>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--bg)">
+              <div style="font-weight:600;font-size:13px;margin-bottom:4px">2️⃣ Porralari sailkapena</div>
+              <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Txirrindulari sailkapena + porralari bakoitzak aukeratutako txirrindulariak. <strong>Lehenik 1.a kalkulatu.</strong></div>
+              <button class="btn btn-primary btn-sm" onclick="runCalcPorralari()">🏆 Kalkulatu porralari sailkapena</button>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:12px">
+              <button class="btn btn-ghost" onclick="runCalcBiak()">⚡ Biak kalkulatu (segidan)</button>
+            </div>
+            <div id="kalk-result"></div>
+          </div>
+        </div>
+        <div class="card"><div class="card-head"><div class="card-title">Nola funtzionatzen du?</div></div><div class="card-body" style="font-size:13px;line-height:1.7;color:var(--text)">
+          <p><strong>1. Txirrindulari sailkapena</strong> taula karreraz karrera berreraikitzen da <code>KarreraSailkapena</code>-tik: karrera bakoitzean puntuak metatzen dira, eta orain arte punturen bat egin duten txirrindulari guztiek dute errenkada.</p>
+          <p style="margin-top:10px"><strong>2. Porralari sailkapena</strong>: porralari bakoitzaren puntuak = berak aukeratutako txirrindularien (<code>PorraApustuak</code>) puntuen batura, karreraz karrera.</p>
+          <div style="margin-top:12px;padding:10px 12px;background:rgba(244,196,48,.08);border:1px solid rgba(244,196,48,.25);border-radius:7px;font-size:12px">⚠️ Taula osoa <strong>berreraikitzen</strong> da (lehengoa ezabatu eta berriz sortu). Uneko apustuak erabiltzen ditu.</div>
+        </div></div>
+      </div>
+    </section>
+
     <!-- EZIZENAK LOTU -->
     <section class="section" id="sec-ezizenak">
       <div class="page-header"><div><div class="page-title">🏷️ Ezizenak lotu</div><div class="page-sub">Ezizen bakoitza porralari bati edo gehiagori esleitu (talde-porra)</div></div></div>
@@ -444,6 +481,7 @@ function renderCurrentSection() {
     case "taulak":           if (state.currentTable) loadGenericTable(state.currentTable); break;
     case "merge":            renderMergeSection(); break;
     case "sariak":           renderSariakTxapSel(); loadSariak(); break;
+    case "kalkulatu":        renderKalkulatuTxapSel(); break;
     case "ezizenak":         loadEzizenak(); break;
     case "banatu":           renderBanatuSection(); break;
   }
@@ -473,7 +511,7 @@ async function reloadData() {
 
   // Beti: arinak diren elementuak (estatistikak, hautagailuak)
   renderStats(); renderDashTxapSel(); renderManualSelects();
-  renderSailTxapSel(); renderRaceTxapSel(); renderSariakTxapSel(); renderUndoList(undoSt);
+  renderSailTxapSel(); renderRaceTxapSel(); renderSariakTxapSel(); renderKalkulatuTxapSel(); renderUndoList(undoSt);
   // Astuna den taula-marrazketa: uneko atalerako bakarrik
   renderCurrentSection();
 }
@@ -1403,6 +1441,60 @@ async function saveSariak() {
   } catch(e) { showToast(e.message, "err"); }
 }
 
+// ── Sailkapenak kalkulatu ───────────────────────────────────────────────────
+function renderKalkulatuTxapSel() {
+  const sel = el("kalk-txap-sel");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = `<option value="">— Hautatu txapelketa —</option>` +
+    state.txapelketak.map(t => `<option value="${t.Txapelketa_ID}">${esc(t.Izena)} ${esc(t.Urtea)}</option>`).join("");
+  if (prev) sel.value = prev;
+}
+
+function _kalkResult(html) { const r = el("kalk-result"); if (r) r.innerHTML = html; }
+
+async function runCalcTxirri() {
+  const tid = el("kalk-txap-sel")?.value;
+  if (!tid) return showToast("Txapelketa hautatu", "err");
+  if (!confirm("Txirrindulari sailkapen taula osoa berreraikiko da. Jarraitu?")) return;
+  _kalkResult(`<div style="color:var(--muted);font-size:13px;padding:8px">Kalkulatzen...</div>`);
+  try {
+    const r = await api("/api/calculate/txirri-sailkapena", { method:"POST", body: JSON.stringify({ txapelketa_id: Number(tid) }) });
+    if (!r.ok) { _kalkResult(`<div style="color:var(--accent);padding:8px">${esc(r.reason)}</div>`); return showToast(r.reason, "err"); }
+    _kalkResult(`<div style="color:#4ade80;font-size:13px;padding:8px">✅ Txirrindulari sailkapena: ${r.karrerak} karrera, ${r.txirrindulariak} txirrindulari, ${r.errenkadak} errenkada.</div>`);
+    showToast("✅ Txirrindulari sailkapena kalkulatuta");
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+async function runCalcPorralari() {
+  const tid = el("kalk-txap-sel")?.value;
+  if (!tid) return showToast("Txapelketa hautatu", "err");
+  if (!confirm("Porralari sailkapen taula osoa berreraikiko da. Jarraitu?")) return;
+  _kalkResult(`<div style="color:var(--muted);font-size:13px;padding:8px">Kalkulatzen...</div>`);
+  try {
+    const r = await api("/api/calculate/porralari-sailkapena", { method:"POST", body: JSON.stringify({ txapelketa_id: Number(tid) }) });
+    if (!r.ok) { _kalkResult(`<div style="color:var(--accent);padding:8px">${esc(r.reason)}</div>`); return showToast(r.reason, "err"); }
+    _kalkResult(`<div style="color:#4ade80;font-size:13px;padding:8px">✅ Porralari sailkapena: ${r.karrerak} karrera, ${r.porralariak} porralari, ${r.errenkadak} errenkada.</div>`);
+    showToast("✅ Porralari sailkapena kalkulatuta");
+  } catch(e) { showToast(e.message, "err"); }
+}
+
+async function runCalcBiak() {
+  const tid = el("kalk-txap-sel")?.value;
+  if (!tid) return showToast("Txapelketa hautatu", "err");
+  if (!confirm("Bi sailkapen taulak osorik berreraikiko dira (txirrindulariak gero porralariak). Jarraitu?")) return;
+  _kalkResult(`<div style="color:var(--muted);font-size:13px;padding:8px">Txirrindulari sailkapena kalkulatzen...</div>`);
+  try {
+    const r1 = await api("/api/calculate/txirri-sailkapena", { method:"POST", body: JSON.stringify({ txapelketa_id: Number(tid) }) });
+    if (!r1.ok) { _kalkResult(`<div style="color:var(--accent);padding:8px">${esc(r1.reason)}</div>`); return showToast(r1.reason, "err"); }
+    _kalkResult(`<div style="color:var(--muted);font-size:13px;padding:8px">Porralari sailkapena kalkulatzen...</div>`);
+    const r2 = await api("/api/calculate/porralari-sailkapena", { method:"POST", body: JSON.stringify({ txapelketa_id: Number(tid) }) });
+    if (!r2.ok) { _kalkResult(`<div style="color:var(--accent);padding:8px">${esc(r2.reason)}</div>`); return showToast(r2.reason, "err"); }
+    _kalkResult(`<div style="color:#4ade80;font-size:13px;padding:8px">✅ Txirrindulariak: ${r1.errenkadak} errenkada (${r1.txirrindulariak} txirri, ${r1.karrerak} karrera).<br>✅ Porralariak: ${r2.errenkadak} errenkada (${r2.porralariak} porralari).</div>`);
+    showToast("✅ Bi sailkapenak kalkulatuta");
+  } catch(e) { showToast(e.message, "err"); }
+}
+
 // ── Merge ─────────────────────────────────────────────────────────────────────
 function renderMergeSection() {
   const kind   = el("merge-kind")?.value || "txirrindulariak";
@@ -1634,6 +1726,7 @@ async function init() {
   el("banatu-src")?.addEventListener("change", loadBanatuEzizenak);
   el("race-txap-sel")?.addEventListener("change", renderKarreraList);
   el("sariak-txap-sel")?.addEventListener("change", loadSariak);
+  el("kalk-txap-sel")?.addEventListener("change", () => el("kalk-result") && (el("kalk-result").innerHTML = ""));
   document.querySelectorAll(".tab[data-sltab]").forEach(t => {
     t.addEventListener("click", ()=>{
       document.querySelectorAll(".tab[data-sltab]").forEach(x=>x.classList.remove("active"));

@@ -83,6 +83,12 @@ class _MyConn:
         cur.execute(sql, params if params else ())
         return _MyCursor(cur)
 
+    def executemany(self, sql, seq_params):
+        sql = sql.replace("?", "%s")
+        cur = self._conn.cursor()
+        cur.executemany(sql, list(seq_params))
+        return _MyCursor(cur)
+
     def commit(self):
         self._conn.commit()
 
@@ -994,7 +1000,7 @@ def _recompute_zenbat_porra(con, porralaria_ids):
             'SELECT COUNT(*) AS n FROM "PorralariTaldeenEzizenak" WHERE Porralaria_ID = ?', [pid]
         ).fetchone()["n"]
         con.execute('UPDATE "Porralariak" SET "Zenbat_Porra" = ? WHERE Porralaria_ID = ?',
-                    [max(n, 1), pid])
+                    [n, pid])
 
 def _porralaria_ezizenak(con, porralaria_id):
     """Porralari batek lotuta dituen ezizenak (txapelketarekin)."""
@@ -1235,16 +1241,18 @@ def apply_izen_ordenak(aldaketak: list) -> dict:
 
 def recalculate_zenbat_porra() -> dict:
     """
-    Porralari bakoitzak zenbat txapelketatan parte hartu duen kalkulatu
-    PorralariTaldeenEzizenak taulatik, eta Porralariak."Zenbat_Porra" eguneratu.
+    Porralari bakoitzak zenbat porra (apustu/ezizen) dituen kalkulatu
+    PorralariTaldeenEzizenak taulako lotura kopurutik, eta Porralariak."Zenbat_Porra" eguneratu.
+    Oharra: apustu kopurua zenbatzen da (ez txapelketa desberdinak): txapelketa berean
+    ezizen anitz edukita, bakoitza porra bat da. Bat dator /api/porralariak eta
+    _recompute_zenbat_porra logikarekin.
     """
     with get_db() as con:
-        # Porralari bakoitzarentzat zenbat ezizen (= txapelketa) dituen zenbatu
+        # Porralari bakoitzarentzat zenbat lotura (= porra/apustu) dituen zenbatu
         counts = con.execute('''
-            SELECT ep.Porralaria_ID, COUNT(DISTINCT pe.Txapelketa_ID) AS kopurua
-            FROM "PorralariTaldeenEzizenak" ep
-            JOIN "PorraEzizenak" pe ON ep.Ezizen_ID = pe.Ezizen_ID
-            GROUP BY ep.Porralaria_ID
+            SELECT Porralaria_ID, COUNT(*) AS kopurua
+            FROM "PorralariTaldeenEzizenak"
+            GROUP BY Porralaria_ID
         ''').fetchall()
 
         aldatuta = 0
@@ -1277,6 +1285,92 @@ def recalculate_zenbat_porra() -> dict:
         con.commit()
 
     return {"ok": True, "aldatuta": aldatuta, "total": len(counts)}
+
+# ─── Sailkapenak kalkulatu ────────────────────────────────────────────────────
+
+def calculate_txirri_sailkapena(txapelketa_id) -> dict:
+    """
+    Txirrindularien sailkapen-taula (TxapelketaSailkapenaTxirrindulariak) kalkulatu
+    karreren emaitzetatik (KarreraSailkapena), karreraz karrera metatuta.
+    Karrera bakoitzean: Puntuak_Azken_Karrera = karrera horretako puntuak,
+    Puntuak_Totalean = aurreko totala + karrera honetakoa. Orain arte punturen bat
+    egin duten txirrindulari guztiek dute errenkada (totala aurrera eramanez).
+    Taula osoa berreraikitzen du (ezabatu + sortu).
+    """
+    try:
+        with get_db() as con:
+            races = [r["Karrerak_ID"] for r in rows(con,
+                'SELECT Karrerak_ID FROM "Karrerak" WHERE Txapelketa_ID = ? ORDER BY Karrerak_ID',
+                [txapelketa_id])]
+            if not races:
+                return {"ok": False, "reason": "Txapelketa honek ez du karrerarik"}
+            con.execute('DELETE FROM "TxapelketaSailkapenaTxirrindulariak" WHERE Txapelketa_ID = ?', [txapelketa_id])
+            totals = {}            # txirri_id -> metatutako totala
+            batch = []
+            karrera_kop = 0
+            for kid in races:
+                pts = {r["Txirrindularia_ID"]: r["Puntuak"] for r in rows(con,
+                    'SELECT Txirrindularia_ID, Puntuak FROM "KarreraSailkapena" WHERE Karrera_ID = ?', [kid])}
+                if not pts:
+                    continue  # emaitzarik ez duen karrerak ez du snapshot-ik sortzen
+                karrera_kop += 1
+                for c, p in pts.items():
+                    totals[c] = totals.get(c, 0) + (p or 0)
+                for c, tot in totals.items():
+                    batch.append((txapelketa_id, c, kid, tot, pts.get(c, 0)))
+            if batch:
+                con.executemany(
+                    'INSERT INTO "TxapelketaSailkapenaTxirrindulariak" '
+                    '(Txapelketa_ID, Txirrindularia_ID, Azken_Karrera_ID, Puntuak_Totalean, '
+                    'Puntuak_Azken_Karrera, Puntuak_Sailkapen_nagusia, Puntuak_Mendian, Eboluzioa) '
+                    'VALUES (?, ?, ?, ?, ?, NULL, NULL, 0)', batch)
+            con.commit()
+        return {"ok": True, "karrerak": karrera_kop, "txirrindulariak": len(totals), "errenkadak": len(batch)}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+def calculate_porralari_sailkapena(txapelketa_id) -> dict:
+    """
+    Porralarien sailkapen-taula (TxapelketaSailkapenaPorralariak) kalkulatu
+    txirrindularien sailkapenetik eta porralari bakoitzak aukeratutako
+    txirrindularietatik (PorraApustuak). Porralari baten puntuak = bere
+    aukeratutako txirrindularien puntuen batura, karreraz karrera.
+    Lehenik txirrindularien sailkapena kalkulatuta egon behar da.
+    """
+    try:
+        with get_db() as con:
+            bets = {}              # ezizen_id -> [txirri_id, ...]
+            for r in rows(con,
+                'SELECT Ezizen_ID, Txirrindularia_ID FROM "PorraApustuak" WHERE Txapelketa_ID = ?', [txapelketa_id]):
+                bets.setdefault(r["Ezizen_ID"], []).append(r["Txirrindularia_ID"])
+            if not bets:
+                return {"ok": False, "reason": "Txapelketa honek ez du apusturik (PorraApustuak)"}
+            # Txirrindularien sailkapena karreraz karrera: {karrera_id: {txirri: (totala, azken)}}
+            stand = {}
+            for r in rows(con,
+                'SELECT Azken_Karrera_ID, Txirrindularia_ID, Puntuak_Totalean, Puntuak_Azken_Karrera '
+                'FROM "TxapelketaSailkapenaTxirrindulariak" WHERE Txapelketa_ID = ?', [txapelketa_id]):
+                stand.setdefault(r["Azken_Karrera_ID"], {})[r["Txirrindularia_ID"]] = (
+                    r["Puntuak_Totalean"] or 0, r["Puntuak_Azken_Karrera"] or 0)
+            if not stand:
+                return {"ok": False, "reason": "Lehenik txirrindularien sailkapena kalkulatu behar da"}
+            con.execute('DELETE FROM "TxapelketaSailkapenaPorralariak" WHERE Txapelketa_ID = ?', [txapelketa_id])
+            batch = []
+            for kid, cyc in stand.items():
+                for ez, chosen in bets.items():
+                    tot  = sum(cyc.get(c, (0, 0))[0] for c in chosen)
+                    last = sum(cyc.get(c, (0, 0))[1] for c in chosen)
+                    batch.append((txapelketa_id, ez, kid, tot, last))
+            if batch:
+                con.executemany(
+                    'INSERT INTO "TxapelketaSailkapenaPorralariak" '
+                    '(Txapelketa_ID, Ezizen_ID, Azken_Karrera_ID, Puntuak_Totalean, '
+                    'Puntuak_Azken_Karrera, Puntuazio_Finala, Puntuazioa_Fin_Mendikoa, Puntuazioa_Fin_Generala) '
+                    'VALUES (?, ?, ?, ?, ?, 0, NULL, NULL)', batch)
+            con.commit()
+        return {"ok": True, "karrerak": len(stand), "porralariak": len(bets), "errenkadak": len(batch)}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
 
 # ─── Formato normalizatu ──────────────────────────────────────────────────────
 
@@ -1592,6 +1686,18 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/recalculate-zenbat-porra":
             return self.send_json(recalculate_zenbat_porra())
+
+        elif path == "/api/calculate/txirri-sailkapena":
+            tid = data.get("txapelketa_id")
+            if not tid:
+                return self.send_error_json("txapelketa_id behar da")
+            return self.send_json(calculate_txirri_sailkapena(int(tid)))
+
+        elif path == "/api/calculate/porralari-sailkapena":
+            tid = data.get("txapelketa_id")
+            if not tid:
+                return self.send_error_json("txapelketa_id behar da")
+            return self.send_json(calculate_porralari_sailkapena(int(tid)))
 
         elif path == "/api/normalize-izenak":
             return self.send_json(normalize_izenak())
