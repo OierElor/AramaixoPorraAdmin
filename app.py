@@ -1,19 +1,106 @@
 #!/usr/bin/env python3
 """
-Aramaixo Porra backend.
-Zero dependentzia: Python stdlib soilik (sqlite3 + http.server)
+Aramaixo Porra backend — MySQL bertsioa (konexio iraunkorra).
 """
 
 import json
 import os
-import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Lock
 from urllib.parse import unquote, urlparse, parse_qs
 
 BASE_DIR = Path(__file__).parent
-SCHEMA   = BASE_DIR / "schema.sql"
 PORT     = int(os.environ.get("PORT", 3000))
+
+# .env fitxategia kargatu
+_env_path = BASE_DIR / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+import mysql.connector
+
+DB_CONFIG = {
+    "host":            os.environ.get("DB_HOST", "82.194.68.136"),
+    "port":            int(os.environ.get("DB_PORT", "3306")),
+    "user":            os.environ.get("DB_USER", "oier"),
+    "password":        os.environ.get("DB_PASS", ""),
+    "database":        os.environ.get("DB_NAME", "6437239_aramaixoporra"),
+    "charset":         "utf8mb4",
+    "autocommit":      False,
+    "connect_timeout": 15,
+    # Hostaliaren zerbitzariak ez du SSL ondo onartzen → handshake-a zintzilikatzen da.
+    # SSL gabe konexioa berehalakoa da.
+    "ssl_disabled":    True,
+    "use_pure":        True,
+}
+
+# Konexio iraunkorra — eskaera guztiak konexio bera berrerabiltzen dute
+_db_conn = None
+_db_lock = Lock()
+
+
+def _new_connection():
+    conn = mysql.connector.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    cur.execute("SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')")
+    cur.close()
+    return conn
+
+
+class _MyCursor:
+    def __init__(self, cur):
+        self._c = cur
+
+    def fetchone(self):
+        return self._c.fetchone()
+
+    def fetchall(self):
+        return self._c.fetchall()
+
+    @property
+    def lastrowid(self):
+        return self._c.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._c.rowcount
+
+
+class _MyConn:
+    """Konexio iraunkorraren wrapper-a: close() ez du konexioa ixten."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        sql = sql.replace("?", "%s")
+        cur = self._conn.cursor(dictionary=True, buffered=True)
+        cur.execute(sql, params if params else ())
+        return _MyCursor(cur)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+
+    def close(self):
+        pass  # Ez itxi — konexioa berrerabiltzen da
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, *_):
+        if exc_type:
+            self.rollback()
 
 # ─── Undo / Redo stack ───────────────────────────────────────────────────────
 _undo_stack: list[dict] = []
@@ -99,47 +186,35 @@ FIELD_ALIASES = {
 
 # ─── DB helpers ───────────────────────────────────────────────────────────────
 
-def find_db() -> Path:
-    if env := os.environ.get("DB_FILE"):
-        return Path(env)
-    for name in ("AramaixoPorra.db", "data.db"):
-        p = BASE_DIR / name
-        if p.exists():
-            return p
-    return BASE_DIR / "AramaixoPorra.db"
-
-DB_PATH = find_db()
-print(f"DB: {DB_PATH.resolve()}")
-
 def get_db():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
-    return con
+    global _db_conn
+    with _db_lock:
+        try:
+            if _db_conn is None:
+                _db_conn = _new_connection()
+            else:
+                _db_conn.ping(reconnect=True, attempts=2, delay=2)
+        except Exception:
+            _db_conn = _new_connection()
+    return _MyConn(_db_conn)
+
 
 def init_db():
-    # DB-a jada badago (Txapelketak taula du), EZ exekutatu schema.sql:
-    # schema.sql zaharkituta dago eta itzal-taula hutsak sor litzake.
-    con = get_db()
+    print("MySQL konexioa ezartzen...", flush=True)
     try:
-        if con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Txapelketak'"
-        ).fetchone():
-            return
-    finally:
-        con.close()
-    if not SCHEMA.exists():
-        print("Warning: schema.sql not found")
-        return
-    con = get_db()
-    for stmt in (s.strip() for s in SCHEMA.read_text("utf-8").split(";") if s.strip()):
-        try:
-            con.execute(stmt)
-        except sqlite3.OperationalError as e:
-            if "already exists" not in str(e):
-                print(f"Schema: {e}")
-    con.commit()
-    con.close()
+        db = get_db()
+        row = db.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = 'Txapelketak'"
+        ).fetchone()
+        if row:
+            print("DB: MySQL konexioa OK", flush=True)
+        else:
+            print("OHARRA: 'Txapelketak' taula ez da aurkitu", flush=True)
+    except Exception as e:
+        print(f"DB konexio errorea: {e}", flush=True)
+        raise
+
 
 init_db()
 
@@ -198,7 +273,7 @@ def _find_txirrindularia_id(con, name: str):
         'SELECT Txirrindularia_ID FROM "Txirrindulariak" WHERE Izena = ?', [name],
     ).fetchone()
     if row:
-        return row[0]
+        return row["Txirrindularia_ID"]
     # 2. Herrialdea kendu eta saiatu berriro: "ROGLIC Primož (Esl)" -> "ROGLIC Primož"
     stripped = _strip_country(name)
     if stripped != name:
@@ -206,93 +281,7 @@ def _find_txirrindularia_id(con, name: str):
             'SELECT Txirrindularia_ID FROM "Txirrindulariak" WHERE Izena = ?', [stripped],
         ).fetchone()
         if row:
-            return row[0]
-    # 3. Normalizatuta bilatu (kasu eta azentu ezikusi)
-    norm_name = _normalize_name(name)
-    all_rows = con.execute(
-        'SELECT Txirrindularia_ID, Izena FROM "Txirrindulariak"'
-    ).fetchall()
-    for r in all_rows:
-        if _normalize_name(r["Izena"]) == norm_name:
-            return r["Txirrindularia_ID"]
-    # 4. Token-ak ordenatu gabe konparatu (Izena-Abizena vs Abizena-Izena)
-    norm_tokens = frozenset(_normalize_name(name).split())
-    for r in all_rows:
-        if frozenset(_normalize_name(r["Izena"]).split()) == norm_tokens:
-            return r["Txirrindularia_ID"]
-    return None
-
-
-
-import unicodedata as _ud
-import re as _re
-
-def _strip_country(name: str) -> str:
-    n = _re.sub(r"[\(\[].*?[\)\]]", "", name).strip()
-    return _re.sub(r"\s+", " ", n).strip()
-
-def _normalize_name(name: str) -> str:
-    n = _strip_country(name)
-    n = _re.sub(r"[-\'.,]", " ", n)
-    n = _ud.normalize("NFD", n.lower())
-    n = "".join(c for c in n if _ud.category(c) != "Mn")
-    return _re.sub(r"\s+", " ", n).strip()
-
-def _name_tokens(name: str) -> frozenset:
-    return frozenset(t for t in _normalize_name(name).split() if len(t) > 1)
-
-def _fuzzy_name_score(a: str, b: str) -> int:
-    na, nb = _normalize_name(a), _normalize_name(b)
-    if not na or not nb:
-        return 0
-    if na == nb:
-        return 100
-    ta, tb = _name_tokens(a), _name_tokens(b)
-    if ta and tb and ta == tb:
-        return 98
-    if ta and tb:
-        inter = ta & tb
-        if inter and (inter == ta or inter == tb):
-            return max(88, int(len(inter) / max(len(ta), len(tb)) * 95))
-        if inter:
-            jaccard = len(inter) / len(ta | tb)
-            if jaccard >= 0.5:
-                return max(75, int(jaccard * 95))
-    def bigrams(s):
-        return set(s[i:i+2] for i in range(len(s) - 1))
-    ba, bb = bigrams(na), bigrams(nb)
-    denom = len(ba) + len(bb)
-    if denom == 0:
-        return 0
-    return int(2 * len(ba & bb) / denom * 100)
-
-def _find_fuzzy_matches(con, name: str, threshold: int = 50) -> list:
-    clean = _strip_country(name)
-    all_riders = con.execute(
-        'SELECT Txirrindularia_ID, Izena FROM "Txirrindulariak" ORDER BY Izena'
-    ).fetchall()
-    matches = []
-    for row in all_riders:
-        score = _fuzzy_name_score(clean, row["Izena"])
-        if score >= threshold:
-            matches.append({"Txirrindularia_ID": row["Txirrindularia_ID"], "Izena": row["Izena"], "score": score})
-    matches.sort(key=lambda x: -x["score"])
-    return matches[:8]
-def _find_txirrindularia_id(con, name: str):
-    # 1. Match zehatza
-    row = con.execute(
-        'SELECT Txirrindularia_ID FROM "Txirrindulariak" WHERE Izena = ?', [name],
-    ).fetchone()
-    if row:
-        return row[0]
-    # 2. Herrialdea kendu eta saiatu berriro: "ROGLIC Primož (Esl)" -> "ROGLIC Primož"
-    stripped = _strip_country(name)
-    if stripped != name:
-        row = con.execute(
-            'SELECT Txirrindularia_ID FROM "Txirrindulariak" WHERE Izena = ?', [stripped],
-        ).fetchone()
-        if row:
-            return row[0]
+            return row["Txirrindularia_ID"]
     # 3. Normalizatuta bilatu (kasu eta azentu ezikusi)
     norm_name = _normalize_name(name)
     all_rows = con.execute(
@@ -445,7 +434,7 @@ def _find_ezizen_id(con, txapelketa_id: int, ezizena: str):
         'SELECT Ezizen_ID FROM "PorraEzizenak" WHERE Txapelketa_ID = ? AND Ezizena = ?',
         [txapelketa_id, ezizena],
     ).fetchone()
-    return row[0] if row else None
+    return row["Ezizen_ID"] if row else None
 
 def _ensure_ezizen_id(con, txapelketa_id: int, ezizena: str) -> int:
     eid = _find_ezizen_id(con, txapelketa_id, ezizena)
@@ -668,10 +657,11 @@ def _insert_row(con, profile_id, norm):
 
 def db_meta():
     with get_db() as con:
-        tables = [row[0] for row in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        tables = [row["TABLE_NAME"] for row in con.execute(
+            "SELECT TABLE_NAME FROM information_schema.tables "
+            "WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME"
         ).fetchall()]
-    return {"db_path": str(DB_PATH.resolve()), "db_exists": DB_PATH.exists(), "tables": tables}
+    return {"db_path": f"MySQL: {DB_CONFIG['host']}/{DB_CONFIG['database']}", "db_exists": True, "tables": tables}
 
 def _quote_ident(name):
     return '"' + name.replace('"', '""') + '"'
@@ -679,12 +669,21 @@ def _quote_ident(name):
 def read_table(table_name):
     with get_db() as con:
         exists = con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? AND name NOT LIKE 'sqlite_%'", [table_name],
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = ?",
+            [table_name],
         ).fetchone()
         if not exists:
             raise ValueError(f"Taula ez da existitzen: {table_name}")
         quoted = _quote_ident(table_name)
-        cols = [dict(r) for r in con.execute(f"PRAGMA table_info({quoted})").fetchall()]
+        cols = [dict(r) for r in con.execute(
+            "SELECT column_name AS name, column_type AS type, "
+            "IF(column_key='PRI', 1, 0) AS pk "
+            "FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = ? "
+            "ORDER BY ordinal_position",
+            [table_name],
+        ).fetchall()]
         table_rows = [dict(r) for r in con.execute(f"SELECT * FROM {quoted}").fetchall()]
     return {"name": table_name, "columns": [{"name": c["name"], "type": c["type"], "pk": c["pk"]} for c in cols], "rows": table_rows, "count": len(table_rows)}
 
@@ -695,12 +694,21 @@ def update_table_row(table_name, payload):
         raise ValueError("Datu baliogabeak")
     with get_db() as con:
         exists = con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? AND name NOT LIKE 'sqlite_%'", [table_name],
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = ?",
+            [table_name],
         ).fetchone()
         if not exists:
             raise ValueError(f"Taula ez da existitzen: {table_name}")
         quoted = _quote_ident(table_name)
-        columns = [dict(r) for r in con.execute(f"PRAGMA table_info({quoted})").fetchall()]
+        columns = [dict(r) for r in con.execute(
+            "SELECT column_name AS name, column_type AS type, "
+            "IF(column_key='PRI', 1, 0) AS pk "
+            "FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = ? "
+            "ORDER BY ordinal_position",
+            [table_name],
+        ).fetchall()]
         column_names = {c["name"] for c in columns}
         pk_columns = [c["name"] for c in sorted((c for c in columns if c["pk"]), key=lambda c: c["pk"])]
         if not pk_columns:
@@ -886,7 +894,9 @@ PORRALARIA_REFS = [
 ]
 
 def _do_merge_refs(con, table, col, pks, keep_id, drop_id):
-    exists = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]).fetchone()
+    exists = con.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?", [table]
+    ).fetchone()
     if not exists:
         return None
     ref_rows = con.execute(f'SELECT * FROM "{table}" WHERE "{col}" = ?', [drop_id]).fetchall()
@@ -937,9 +947,9 @@ def _recompute_zenbat_porra(con, porralaria_ids):
     """Emandako porralarien 'Zenbat Porra' lotura-kopurutik eguneratu."""
     for pid in set(p for p in porralaria_ids if p):
         n = con.execute(
-            'SELECT COUNT(*) FROM "PorralariTaldeenEzizenak" WHERE Porralaria_ID = ?', [pid]
-        ).fetchone()[0]
-        con.execute('UPDATE "Porralariak" SET "Zenbat Porra" = ? WHERE Porralaria_ID = ?',
+            'SELECT COUNT(*) AS n FROM "PorralariTaldeenEzizenak" WHERE Porralaria_ID = ?', [pid]
+        ).fetchone()["n"]
+        con.execute('UPDATE "Porralariak" SET "Zenbat_Porra" = ? WHERE Porralaria_ID = ?',
                     [max(n, 1), pid])
 
 def _porralaria_ezizenak(con, porralaria_id):
@@ -958,8 +968,8 @@ def _get_or_create_porralaria(con, izena):
         return None
     row = con.execute('SELECT Porralaria_ID FROM "Porralariak" WHERE Izena = ?', [izena]).fetchone()
     if row:
-        return row[0]
-    cur = con.execute('INSERT INTO "Porralariak" (Izena, "Zenbat Porra") VALUES (?, 1)', [izena])
+        return row["Porralaria_ID"]
+    cur = con.execute('INSERT INTO "Porralariak" (Izena, "Zenbat_Porra") VALUES (?, 1)', [izena])
     return cur.lastrowid
 
 def ezizen_lotu(data):
@@ -998,7 +1008,7 @@ def ezizen_lotu(data):
                 'SELECT Porralaria_ID FROM "PorralariTaldeenEzizenak" WHERE Ezizen_ID = ?', [ezizen_id]).fetchall()]
             con.execute('DELETE FROM "PorralariTaldeenEzizenak" WHERE Ezizen_ID = ?', [ezizen_id])
             for pid in target:
-                con.execute('INSERT OR IGNORE INTO "PorralariTaldeenEzizenak" (Ezizen_ID, Porralaria_ID) VALUES (?, ?)',
+                con.execute('INSERT IGNORE INTO "PorralariTaldeenEzizenak" (Ezizen_ID, Porralaria_ID) VALUES (?, ?)',
                             [ezizen_id, pid])
             _recompute_zenbat_porra(con, set(prev) | set(target))
             con.commit()
@@ -1048,12 +1058,12 @@ def porralari_split(data):
                     continue
                 con.execute('DELETE FROM "PorralariTaldeenEzizenak" WHERE Ezizen_ID = ? AND Porralaria_ID = ?',
                             [eid, source_id])
-                con.execute('INSERT OR IGNORE INTO "PorralariTaldeenEzizenak" (Ezizen_ID, Porralaria_ID) VALUES (?, ?)',
+                con.execute('INSERT IGNORE INTO "PorralariTaldeenEzizenak" (Ezizen_ID, Porralaria_ID) VALUES (?, ?)',
                             [eid, target_id])
                 moved += 1
             _recompute_zenbat_porra(con, {int(source_id), int(target_id)})
             con.commit()
-            tgt_izena = con.execute('SELECT Izena FROM "Porralariak" WHERE Porralaria_ID = ?', [target_id]).fetchone()[0]
+            tgt_izena = con.execute('SELECT Izena FROM "Porralariak" WHERE Porralaria_ID = ?', [target_id]).fetchone()["Izena"]
         return {"ok": True, "source_id": int(source_id), "target_id": int(target_id),
                 "target_izena": tgt_izena, "moved": moved}
     except Exception as e:
@@ -1081,9 +1091,9 @@ def merge_porralariak(keep_id, drop_id):
         if not drop:
             return {"ok": False, "reason": f"Drop ID {drop_id} ez da existitzen"}
         log = [r for table, col, pks in PORRALARIA_REFS if (r := _do_merge_refs(con, table, col, pks, keep_id, drop_id))]
-        keep_count = dict(keep).get("Zenbat Porra") or 1
-        drop_count = dict(drop).get("Zenbat Porra") or 1
-        con.execute('UPDATE "Porralariak" SET "Zenbat Porra" = ? WHERE Porralaria_ID = ?', [keep_count + drop_count, keep_id])
+        keep_count = dict(keep).get("Zenbat_Porra") or 1
+        drop_count = dict(drop).get("Zenbat_Porra") or 1
+        con.execute('UPDATE "Porralariak" SET "Zenbat_Porra" = ? WHERE Porralaria_ID = ?', [keep_count + drop_count, keep_id])
         con.execute('DELETE FROM "Porralariak" WHERE Porralaria_ID = ?', [drop_id])
         con.commit()
     return {"ok": True, "keep": {"id": keep_id, "izena": dict(keep)["Izena"]}, "dropped": {"id": drop_id, "izena": dict(drop)["Izena"]}, "log": log}
@@ -1099,15 +1109,19 @@ def merge_preview(kind, keep_id, drop_id):
             return {"ok": False, "reason": "ID bat ez da existitzen"}
         refs = []
         for table, col, _ in refs_map:
-            ex = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]).fetchone()
+            ex = con.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?", [table]
+            ).fetchone()
             if not ex:
                 continue
-            count = con.execute(f'SELECT COUNT(*) FROM "{table}" WHERE "{col}" = ?', [drop_id]).fetchone()[0]
+            count = con.execute(
+                f'SELECT COUNT(*) AS n FROM "{table}" WHERE "{col}" = ?', [drop_id]
+            ).fetchone()["n"]
             if count:
                 refs.append({"table": table, "count": count})
         result = {"ok": True, "keep": {"id": keep_id, "izena": dict(keep)["Izena"]}, "dropped": {"id": drop_id, "izena": dict(drop)["Izena"]}, "refs": refs}
         if kind == "porralariak":
-            result["zenbat_porra_merged"] = (dict(keep).get("Zenbat Porra") or 1) + (dict(drop).get("Zenbat Porra") or 1)
+            result["zenbat_porra_merged"] = (dict(keep).get("Zenbat_Porra") or 1) + (dict(drop).get("Zenbat_Porra") or 1)
             # Porralari bakoitzaren ezizenak erakutsi, zer fusionatzen den ikusteko
             result["keep"]["ezizenak"] = _porralaria_ezizenak(con, keep_id)
             result["dropped"]["ezizenak"] = _porralaria_ezizenak(con, drop_id)
@@ -1178,7 +1192,7 @@ def apply_izen_ordenak(aldaketak: list) -> dict:
 def recalculate_zenbat_porra() -> dict:
     """
     Porralari bakoitzak zenbat txapelketatan parte hartu duen kalkulatu
-    PorralariTaldeenEzizenak taulatik, eta Porralariak."Zenbat Porra" eguneratu.
+    PorralariTaldeenEzizenak taulatik, eta Porralariak."Zenbat_Porra" eguneratu.
     """
     with get_db() as con:
         # Porralari bakoitzarentzat zenbat ezizen (= txapelketa) dituen zenbatu
@@ -1194,11 +1208,11 @@ def recalculate_zenbat_porra() -> dict:
             pid     = row["Porralaria_ID"]
             kopurua = row["kopurua"]
             current = con.execute(
-                'SELECT "Zenbat Porra" FROM "Porralariak" WHERE Porralaria_ID = ?', [pid]
+                'SELECT "Zenbat_Porra" FROM "Porralariak" WHERE Porralaria_ID = ?', [pid]
             ).fetchone()
-            if current and current["Zenbat Porra"] != kopurua:
+            if current and current["Zenbat_Porra"] != kopurua:
                 con.execute(
-                    'UPDATE "Porralariak" SET "Zenbat Porra" = ? WHERE Porralaria_ID = ?',
+                    'UPDATE "Porralariak" SET "Zenbat_Porra" = ? WHERE Porralaria_ID = ?',
                     [kopurua, pid]
                 )
                 aldatuta += 1
@@ -1208,11 +1222,11 @@ def recalculate_zenbat_porra() -> dict:
         counted_ids = {r["Porralaria_ID"] for r in counts}
         for pid in all_ids - counted_ids:
             current = con.execute(
-                'SELECT "Zenbat Porra" FROM "Porralariak" WHERE Porralaria_ID = ?', [pid]
+                'SELECT "Zenbat_Porra" FROM "Porralariak" WHERE Porralaria_ID = ?', [pid]
             ).fetchone()
-            if current and current["Zenbat Porra"] != 0:
+            if current and current["Zenbat_Porra"] != 0:
                 con.execute(
-                    'UPDATE "Porralariak" SET "Zenbat Porra" = 0 WHERE Porralaria_ID = ?', [pid]
+                    'UPDATE "Porralariak" SET "Zenbat_Porra" = 0 WHERE Porralaria_ID = ?', [pid]
                 )
                 aldatuta += 1
 
@@ -1399,7 +1413,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Ezizen batek porralari anitz izan ditzake (talde-porra): izenak batu, errenkadak ez bikoizteko.
                 return self.send_json(rows(con,
                     'SELECT e.*, ez.Ezizena, '
-                    'GROUP_CONCAT(p.Izena, ", ") AS Porralaria '
+                    "GROUP_CONCAT(p.Izena SEPARATOR ', ') AS Porralaria "
                     'FROM "TxapelketaEmaitzaPorralariak" e '
                     'JOIN "PorraEzizenak" ez ON e.Ezizen_ID = ez.Ezizen_ID '
                     'LEFT JOIN "PorralariTaldeenEzizenak" ep ON ez.Ezizen_ID = ep.Ezizen_ID '
